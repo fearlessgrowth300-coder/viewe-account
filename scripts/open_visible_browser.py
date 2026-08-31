@@ -155,13 +155,6 @@ async def main():
         context = browser.contexts[0]
         page = context.pages[0]
 
-        # Authenticate proxy on Playwright BrowserContext
-        if USE_PROXY and soax_proxy:
-            print("[*] Authenticating SOAX proxy credentials on context...")
-            await context.set_http_credentials({
-                "username": soax_proxy["username"],
-                "password": soax_proxy["password"]
-            })
 
         # Inject session cookies
         if cookies:

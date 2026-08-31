@@ -13,7 +13,7 @@ chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
 function callbackFn(details) {
     return {
         authCredentials: {
-            username: "package-349957-country-us-region-ohio-city-columbus-sessionid-BW6w79p05yk43ODr-sessionlength-3600-bindttl-3600",
+            username: "package-349957-country-us-region-florida-city-miami-sessionid-Xjv8PnGXrrLWwthb-sessionlength-3600-bindttl-3600",
             password: "iHbxsDeKT3Gzcwt3"
         }
     };
