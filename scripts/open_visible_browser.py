@@ -127,6 +127,7 @@ async def main():
     print("="*60)
 
     cookies, auth_token, username = load_account_data()
+    soax_proxy = None
 
     # 1. Launch real undetected browser with SeleniumBase UC Mode
     proxy_string = None
@@ -154,6 +155,14 @@ async def main():
         context = browser.contexts[0]
         page = context.pages[0]
 
+        # Authenticate proxy on Playwright BrowserContext
+        if USE_PROXY and soax_proxy:
+            print("[*] Authenticating SOAX proxy credentials on context...")
+            await context.set_http_credentials({
+                "username": soax_proxy["username"],
+                "password": soax_proxy["password"]
+            })
+
         # Inject session cookies
         if cookies:
             print(f"[AUTH] Injected {len(cookies)} cookies for '{username}'...")
@@ -169,7 +178,7 @@ async def main():
         """)
 
         print(f"[*] Navigating to {TARGET_CHANNEL_URL}...")
-        await page.goto(TARGET_CHANNEL_URL, timeout=60000)
+        await page.goto(TARGET_CHANNEL_URL, wait_until="domcontentloaded", timeout=60000)
 
         # 1. HUMAN EMULATION: Watch stream for 20-30s and scroll
         await simulate_human_viewer_behavior(page)
