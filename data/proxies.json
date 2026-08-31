@@ -1,0 +1,62 @@
+[
+  {
+    "id": "soax_miami_1",
+    "name": "Zia_Faceless_Mom",
+    "country": "US",
+    "region": "Florida",
+    "city": "Miami",
+    "server": "http://proxy.soax.com:5000",
+    "username": "package-349957-country-us-region-florida-city-miami-sessionid-Xjv8PnGXrrLWwthb-sessionlength-3600-bindttl-3600",
+    "password": "iHbxsDeKT3Gzcwt3"
+  },
+  {
+    "id": "soax_bradford_gb",
+    "name": "Ruby_Digital_Mom",
+    "country": "GB",
+    "region": "England",
+    "city": "Bradford",
+    "server": "http://proxy.soax.com:5000",
+    "username": "package-349957-country-gb-region-england-city-bradford-sessionid-GlosAkPNI6DrktgV-sessionlength-3600-bindttl-3600",
+    "password": "iHbxsDeKT3Gzcwt3"
+  },
+  {
+    "id": "soax_birmingham_gb",
+    "name": "Stella_Faceless",
+    "country": "GB",
+    "region": "England",
+    "city": "Birmingham",
+    "server": "http://proxy.soax.com:5000",
+    "username": "package-349957-country-gb-region-england-city-birmingham-sessionid-bVYP3nCHqVds8Wbr-sessionlength-3600-bindttl-3600",
+    "password": "iHbxsDeKT3Gzcwt3"
+  },
+  {
+    "id": "soax_south_elgin_us",
+    "name": "Nova_Wealth_1",
+    "country": "US",
+    "region": "Illinois",
+    "city": "South Elgin",
+    "server": "http://proxy.soax.com:5000",
+    "username": "package-349957-country-us-region-illinois-city-south+elgin-sessionid-3p71469oc4mSjMX2-sessionlength-3600-bindttl-3600",
+    "password": "iHbxsDeKT3Gzcwt3"
+  },
+  {
+    "id": "soax_columbus_us",
+    "name": "DigitalwealthbyAva",
+    "country": "US",
+    "region": "Ohio",
+    "city": "Columbus",
+    "server": "http://proxy.soax.com:5000",
+    "username": "package-349957-country-us-region-ohio-city-columbus-sessionid-BW6w79p05yk43ODr-sessionlength-3600-bindttl-3600",
+    "password": "iHbxsDeKT3Gzcwt3"
+  },
+  {
+    "id": "soax_miami_2",
+    "name": "Nova_Wealth_2",
+    "country": "US",
+    "region": "Florida",
+    "city": "Miami",
+    "server": "http://proxy.soax.com:5000",
+    "username": "package-349957-country-us-region-florida-city-miami-sessionid-OVOcPIyAR2oWr7jV-sessionlength-3600-bindttl-3600",
+    "password": "iHbxsDeKT3Gzcwt3"
+  }
+]

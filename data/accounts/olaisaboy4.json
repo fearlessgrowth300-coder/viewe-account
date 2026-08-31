@@ -1,0 +1,119 @@
+{
+  "account_id": "olaisaboy4",
+  "username": "olaisaboy4",
+  "platform": "Twitch",
+  "status": "active",
+  "auth_token": "bah2goqv6myrxqwov1q0xd81o0f4xv",
+  "cookies": [
+    {
+      "name": "persistent",
+      "value": "1533613652%3A%3Aqjiwlcvh5nno261yoxpqdzq0vpit4z",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "expires": 1803316908
+    },
+    {
+      "name": "server_session_id",
+      "value": "bb052fca604045a69901d47897e61a05",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None"
+    },
+    {
+      "name": "experiment_overrides",
+      "value": "{%22experiments%22:{}%2C%22disabled%22:[]}",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1802336767
+    },
+    {
+      "name": "auth-token",
+      "value": "bah2goqv6myrxqwov1q0xd81o0f4xv",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1803703309
+    },
+    {
+      "name": "bits_sudo",
+      "value": "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNTMzNjEzNjUyIiwiYXVkIjpbInN1ZG8iLCJiaXRzIl0sImV4cCI6MTc4ODM2OTcwOCwiaWF0IjoxNzg3NzY0OTA4fQ==.j5Dav6T16hBSu9UtL3HTlaQAta47TPW-XUbiL33j0PsmSglH9AyPAjEqXAkxWf_4ZW80JJiBwLOnanYGl5xf9w==",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "expires": 1788369708
+    },
+    {
+      "name": "api_token",
+      "value": "af968e4f9cc532a79bb53985186bd462",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "expires": 1803316908
+    },
+    {
+      "name": "login",
+      "value": "olaisaboy4",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1803703309
+    },
+    {
+      "name": "spare_key",
+      "value": "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL3Bhc3Nwb3J0LnR3aXRjaC50diIsInN1YiI6IltcIjE1MzM2MTM2NTJcIl0iLCJhdWQiOiJicnV0ZS1mb3JjZS1wcm90ZWN0aW9uIiwiZXhwIjoxODAzMzE2OTA4LCJpYXQiOjE3ODc3NjQ5MDgsIm5vbmNlIjoiQjI5ZEtFSi0tVDVqVVVhbWxSdTctQ2hCWGVZdzVKZzlzbXBrQXFZbVpUOD0ifQ%3D%3D.wm1FJf_GuTNDwy5eOWDhOo9S9u_9KdAYzbvk4iZKhjzLdzoY5IhRRb-R6bVex99BeIIuxM59letR1y7c_VwEWA%3D%3D",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "expires": 1803316908
+    },
+    {
+      "name": "twilight-user",
+      "value": "{%22authToken%22:%22bah2goqv6myrxqwov1q0xd81o0f4xv%22%2C%22displayName%22:%22olaisaboy4%22%2C%22id%22:%221533613652%22%2C%22login%22:%22olaisaboy4%22%2C%22roles%22:{%22isStaff%22:false}%2C%22version%22:2}",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1803703309
+    },
+    {
+      "name": "unique_id",
+      "value": "3b2d03cb8a7d4d4ebf854fdc8f01ed6f",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1803703292
+    },
+    {
+      "name": "unique_id_durable",
+      "value": "3b2d03cb8a7d4d4ebf854fdc8f01ed6f",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "None",
+      "expires": 1803703292
+    }
+  ],
+  "hardware_profile": {
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "screen_width": 1920,
+    "screen_height": 1080
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "account_id": "apotheosis816",
+  "username": "apotheosis816",
+  "platform": "Twitch",
+  "status": "active",
+  "auth_token": "4vwcivo7o3bxy3yt0pt15xtzmyqxxf",
+  "cookies": [
+    {
+      "name": "server_session_id",
+      "value": "c083a710549a49dd96b679458ef0de2e",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None"
+    },
+    {
+      "name": "experiment_overrides",
+      "value": "{%22experiments%22:{}%2C%22disabled%22:[]}",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1802727476
+    },
+    {
+      "name": "auth-token",
+      "value": "4vwcivo7o3bxy3yt0pt15xtzmyqxxf",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1803698612
+    },
+    {
+      "name": "api_token",
+      "value": "twilight.7e0fca2e022748bb95fb52dc132ceff4",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1802727476
+    },
+    {
+      "name": "spare_key",
+      "value": "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL3Bhc3Nwb3J0LnR3aXRjaC50diIsInN1YiI6IltcIjE1MzA5Mzg3NzNcIl0iLCJhdWQiOiJicnV0ZS1mb3JjZS1wcm90ZWN0aW9uIiwiZXhwIjoxODAyNzI5OTI5LCJpYXQiOjE3ODcxNzc5MjksIm5vbmNlIjoieXZqSUxZaVpOcTZTZFp2eDdlV29nblNWaVdUbU80T05lOHRudlQzRmItZz0ifQ%3D%3D.1OGlSUUexNW0yNPjDDBPZKPf3kDemU1hCfK06KgFwd-Nu0M2rsMeZ-iluMa_kaJXBvFc8_mxtVpwncu-91oOvg%3D%3D",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true
+    },
+    {
+      "name": "twilight-user",
+      "value": "{%22authToken%22:%224vwcivo7o3bxy3yt0pt15xtzmyqxxf%22%2C%22displayName%22:%22apotheosis816%22%2C%22id%22:%221530938773%22%2C%22login%22:%22apotheosis816%22%2C%22roles%22:{%22isStaff%22:false}%2C%22version%22:2}",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1803698612
+    },
+    {
+      "name": "unique_id",
+      "value": "38abf9ae46184dfc828168f239734113",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false,
+      "sameSite": "None",
+      "expires": 1803698634
+    },
+    {
+      "name": "unique_id_durable",
+      "value": "38abf9ae46184dfc828168f239734113",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "None",
+      "expires": 1803698634
+    }
+  ],
+  "hardware_profile": {
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "screen_width": 1920,
+    "screen_height": 1080
+  }
+}

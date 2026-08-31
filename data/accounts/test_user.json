@@ -1,0 +1,18 @@
+{
+  "account_id": "test_user_2cdbe84f",
+  "username": "test_user_2cdbe84f",
+  "email": "test_2cdbe84f@example.com",
+  "cookies": [
+    {
+      "name": "auth_token",
+      "value": "session_test_user_2cdbe84f_token_99x",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": []
+}

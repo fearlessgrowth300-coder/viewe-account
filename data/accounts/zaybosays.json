@@ -1,0 +1,21 @@
+{
+  "account_id": "zaybosays",
+  "username": "zaybosays",
+  "platform": "Twitch",
+  "status": "idle",
+  "auth_token": "",
+  "cookies": [
+    {
+      "name": "auth-token",
+      "value": "PASTE_YOUR_OAUTH_OR_SESSION_TOKEN_HERE",
+      "domain": ".twitch.tv",
+      "path": "/"
+    }
+  ],
+  "proxy_config": null,
+  "hardware_profile": {
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "screen_width": 1920,
+    "screen_height": 1080
+  }
+}

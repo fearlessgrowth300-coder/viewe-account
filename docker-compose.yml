@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # 1. DATABASE & QUEUE LAYER
+  redis:
+    image: redis:alpine
+    container_name: dashboard-redis-queue
+    ports:
+      - "6379:6379"
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  # 2. FASTAPI BACKEND APP LAYER
+  backend:
+    build:
+      context: .
+      dockerfile: ./backend.Dockerfile  # Pointing to your python backend configuration
+    container_name: dashboard-fastapi-backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    restart: always
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=.
+
+  # 3. BACKGROUND TASK ENGINE LAYER (Celery Workers)
+  celery_worker:
+    build:
+      context: .
+      dockerfile: ./backend.Dockerfile
+    container_name: dashboard-automation-worker
+    # Concurrency configuration running in solo pool mode optimized for headless execution
+    command: celery -A app.tasks.celery_app worker --loglevel=info -P solo
+    depends_on:
+      - redis
+      - backend
+    restart: always
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=.
+
+  # 4. FRONTEND UI INTERFACE LAYER (React Canvas)
+  frontend:
+    build:
+      context: .
+      dockerfile: ./frontend.Dockerfile # Pointing to your React static web file setup
+    container_name: darkboard-react-ui
+    ports:
+      - "80:80"                      # Exposes the frontend globally on standard HTTP web port 80
+    depends_on:
+      - backend
+    restart: always
+
+volumes:
+  redis_data:
