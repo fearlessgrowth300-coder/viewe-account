@@ -3,15 +3,14 @@ import json
 import os
 import sys
 import random
-import time
 
 # Ensure root workspace directory is in python path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from seleniumbase import Driver
 from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 from app.stealth import ProxyRotator
 
 TARGET_CHANNEL_URL = "https://www.twitch.tv/vinco_vibeslive"
@@ -57,7 +56,7 @@ async def auto_follow_channel(page):
     Clicks Follow once after genuine human emulation warm-up.
     """
     print("\n" + "="*50)
-    print("💜 ATTEMPTING TO FOLLOW VIA UNDETECTED UC MODE...")
+    print("💜 ATTEMPTING TO FOLLOW VIA STEALTH SESSION...")
     print("="*50)
 
     try:
@@ -122,46 +121,49 @@ async def type_and_send_chat(page, message: str):
 
 async def main():
     print("="*60)
-    print("🛡️ Launching HYBRID SELENIUMBASE UC MODE + PLAYWRIGHT CDP")
+    print("🛡️ Launching STEALTH Chrome with SOAX Residential Proxy")
     print(f"Target: {TARGET_CHANNEL_URL}")
     print("="*60)
 
     cookies, auth_token, username = load_account_data()
-    soax_proxy = None
+    proxy_config = None
 
-    # 1. Launch real undetected browser with SeleniumBase UC Mode
-    proxy_string = None
     if USE_PROXY:
         soax_proxy = ProxyRotator.get_authenticated_proxy()
         if soax_proxy:
-            print(f"🌐 [PROXY ACTIVE] SOAX Residential ({soax_proxy.get('city')}, {soax_proxy.get('country')})")
-            user = soax_proxy["username"]
-            pwd = soax_proxy["password"]
-            server = soax_proxy["server"].replace("http://", "")
-            proxy_string = f"{user}:{pwd}@{server}"
+            print(f"🌐 [PROXY ACTIVE] SOAX Residential: {soax_proxy.get('city')}, {soax_proxy.get('country')}")
+            proxy_config = {
+                "server": soax_proxy["server"],
+                "username": soax_proxy["username"],
+                "password": soax_proxy["password"]
+            }
 
-    print("[*] Starting SeleniumBase Undetected Chrome Driver...")
-    driver_kwargs = {"uc": True, "headless": False}
-    if proxy_string:
-        driver_kwargs["proxy"] = proxy_string
-
-    driver = Driver(**driver_kwargs)
-    cdp_address = driver.capabilities["goog:chromeOptions"]["debuggerAddress"]
-    print(f"✅ [UC MODE READY] Chrome DevTools Protocol bound at: {cdp_address}")
-
-    # 2. Connect Playwright to the undetected SeleniumBase Chrome instance
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(f"http://{cdp_address}")
-        context = browser.contexts[0]
-        page = context.pages[0]
+        launch_args = {
+            "headless": False,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
+                "--disable-infobars",
+                "--no-sandbox"
+            ]
+        }
+        if proxy_config:
+            launch_args["proxy"] = proxy_config
 
+        browser = await p.chromium.launch(**launch_args)
+        
+        context = await browser.new_context(
+            no_viewport=True,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="en-US",
+            timezone_id="America/New_York"
+        )
 
-        # Inject session cookies
         if cookies:
             print(f"[AUTH] Injected {len(cookies)} cookies for '{username}'...")
             await context.add_cookies(cookies)
 
-        # Inject LocalStorage token
         await context.add_init_script(f"""
             try {{
                 localStorage.setItem('auth-token', '{auth_token}');
@@ -169,6 +171,13 @@ async def main():
                 localStorage.setItem('login', '{username}');
             }} catch(e) {{}}
         """)
+
+        page = await context.new_page()
+
+        # Apply stealth patches
+        stealth = Stealth()
+        await stealth.apply_stealth_async(page)
+        print("✅ [STEALTH] Stealth evasion patches applied.")
 
         print(f"[*] Navigating to {TARGET_CHANNEL_URL}...")
         await page.goto(TARGET_CHANNEL_URL, wait_until="domcontentloaded", timeout=60000)
@@ -190,7 +199,6 @@ async def main():
         
         await asyncio.Event().wait()
         await browser.close()
-        driver.quit()
 
 if __name__ == "__main__":
     asyncio.run(main())
