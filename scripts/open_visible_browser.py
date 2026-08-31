@@ -3,14 +3,15 @@ import json
 import os
 import sys
 import random
+import time
 
 # Ensure root workspace directory is in python path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from seleniumbase import Driver
 from playwright.async_api import async_playwright
-from playwright_stealth import Stealth
 from app.stealth import ProxyRotator
 
 TARGET_CHANNEL_URL = "https://www.twitch.tv/vinco_vibeslive"
@@ -36,21 +37,17 @@ def load_account_data():
 
 async def simulate_human_viewer_behavior(page):
     """
-    HUMAN EMULATION: Simulates active watching and page scrolling
-    before interacting with the Follow button.
+    HUMAN EMULATION: Simulates active watching and page scrolling.
     """
     warmup_time = random.uniform(20.0, 30.0)
     print(f"\n[*] 🕒 Simulating real human viewer watching stream for {warmup_time:.1f} seconds...")
     
-    # Wait half the warmup
     await asyncio.sleep(warmup_time / 2)
 
-    # Scroll down to simulate reading chat and channel panels
     print("[*] 📜 Simulating active reading (scrolling down)...")
     await page.mouse.wheel(0, 400)
     await asyncio.sleep(random.uniform(2.5, 4.5))
 
-    # Scroll back up to stream video
     print("[*] 📜 Scrolling back up to video stream...")
     await page.mouse.wheel(0, -400)
     await asyncio.sleep(warmup_time / 2)
@@ -58,20 +55,17 @@ async def simulate_human_viewer_behavior(page):
 async def auto_follow_channel(page):
     """
     Clicks Follow once after genuine human emulation warm-up.
-    Uses strict localized aria-label and text locators.
     """
     print("\n" + "="*50)
-    print("💜 ATTEMPTING TO FOLLOW (AFTER HUMAN EMULATION)...")
+    print("💜 ATTEMPTING TO FOLLOW VIA UNDETECTED UC MODE...")
     print("="*50)
 
     try:
-        # Check if already followed
         already_following = page.locator('button[aria-label="Unfollow"], button:has-text("Unfollow"), button:has-text("Following")')
         if await already_following.count() > 0 and await already_following.first.is_visible():
             print("ℹ️ [AUTO-FOLLOW] Account is ALREADY following this channel.")
             return
 
-        # Strict locator prioritizing aria-label="Follow" and text="Follow"
         follow_btn = page.locator('button[aria-label="Follow"], button:has-text("Follow")').first
         await follow_btn.wait_for(state="visible", timeout=15000)
         
@@ -83,7 +77,6 @@ async def auto_follow_channel(page):
         await follow_btn.click()
         print("💜 [AUTO-FOLLOW] Follow button clicked!")
         
-        # Wait 5 seconds to let Twitch GraphQL mutation stick
         await asyncio.sleep(5.0)
         print("🎉 [AUTO-FOLLOW COMPLETE] Follow registered.")
     except Exception as e:
@@ -127,65 +120,43 @@ async def type_and_send_chat(page, message: str):
     except Exception as e:
         print(f"❌ [CHAT ERROR]: {e}")
 
-async def launch_stealth_browser(p, proxy_config=None):
-    """
-    Launches Chrome with strict undetected launch flags and desktop environment.
-    """
-    launch_args = {
-        "headless": False,
-        "args": [
-            "--disable-blink-features=AutomationControlled", # Shuts down navigator.webdriver completely
-            "--start-maximized",
-            "--disable-infobars",
-            "--no-sandbox"
-        ]
-    }
-    if proxy_config:
-        launch_args["proxy"] = proxy_config
-
-    browser = await p.chromium.launch(**launch_args)
-    
-    context = await browser.new_context(
-        viewport={"width": 1920, "height": 1080},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        locale="en-US",
-        timezone_id="America/New_York"
-    )
-    
-    page = await context.new_page()
-    
-    # Apply stealth evasion patch before loading cookies or pages
-    stealth = Stealth()
-    await stealth.apply_stealth_async(page)
-    print("✅ [STEALTH] Stealth evasion patches applied to browser page.")
-    
-    return browser, context, page
-
 async def main():
     print("="*60)
-    print("🛡️ Launching UNDETECTED BROWSER CONFIGURATION with SOAX Proxy")
+    print("🛡️ Launching HYBRID SELENIUMBASE UC MODE + PLAYWRIGHT CDP")
     print(f"Target: {TARGET_CHANNEL_URL}")
     print("="*60)
 
     cookies, auth_token, username = load_account_data()
-    proxy_config = None
 
+    # 1. Launch real undetected browser with SeleniumBase UC Mode
+    proxy_string = None
     if USE_PROXY:
         soax_proxy = ProxyRotator.get_authenticated_proxy()
         if soax_proxy:
-            print(f"🌐 [PROXY ACTIVE] Routing through SOAX Residential ({soax_proxy.get('city')}, {soax_proxy.get('country')})")
-            proxy_config = {
-                "server": soax_proxy["server"],
-                "username": soax_proxy["username"],
-                "password": soax_proxy["password"]
-            }
+            print(f"🌐 [PROXY ACTIVE] SOAX Residential ({soax_proxy.get('city')}, {soax_proxy.get('country')})")
+            user = soax_proxy["username"]
+            pwd = soax_proxy["password"]
+            server = soax_proxy["server"].replace("http://", "")
+            proxy_string = f"{user}:{pwd}@{server}"
 
+    print("[*] Starting SeleniumBase Undetected Chrome Driver...")
+    driver_kwargs = {"uc": True, "headless": False}
+    if proxy_string:
+        driver_kwargs["proxy"] = proxy_string
+
+    driver = Driver(**driver_kwargs)
+    cdp_address = driver.capabilities["goog:chromeOptions"]["debuggerAddress"]
+    print(f"✅ [UC MODE READY] Chrome DevTools Protocol bound at: {cdp_address}")
+
+    # 2. Connect Playwright to the undetected SeleniumBase Chrome instance
     async with async_playwright() as p:
-        browser, context, page = await launch_stealth_browser(p, proxy_config=proxy_config)
+        browser = await p.chromium.connect_over_cdp(f"http://{cdp_address}")
+        context = browser.contexts[0]
+        page = context.pages[0]
 
         # Inject session cookies
         if cookies:
-            print(f"[AUTH] Injected {len(cookies)} session cookies for '{username}'...")
+            print(f"[AUTH] Injected {len(cookies)} cookies for '{username}'...")
             await context.add_cookies(cookies)
 
         # Inject LocalStorage token
@@ -198,12 +169,12 @@ async def main():
         """)
 
         print(f"[*] Navigating to {TARGET_CHANNEL_URL}...")
-        await page.goto(TARGET_CHANNEL_URL, wait_until="domcontentloaded")
-        
+        await page.goto(TARGET_CHANNEL_URL, timeout=60000)
+
         # 1. HUMAN EMULATION: Watch stream for 20-30s and scroll
         await simulate_human_viewer_behavior(page)
 
-        # 2. Click Follow with strict aria-label/text locator
+        # 2. Click Follow
         await auto_follow_channel(page)
         await asyncio.sleep(3)
 
@@ -217,6 +188,7 @@ async def main():
         
         await asyncio.Event().wait()
         await browser.close()
+        driver.quit()
 
 if __name__ == "__main__":
     asyncio.run(main())
