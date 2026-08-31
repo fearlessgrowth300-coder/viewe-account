@@ -36,18 +36,15 @@ def load_account_cookies(account_id: Optional[str] = None) -> tuple:
     return [], "", "olaisaboy4"
 
 async def auto_follow_channel(page: Page):
-    """Resilient Follow Button Handler with Unfollow Guard."""
+    """Resilient Follow Button Handler with Unfollow Guard & Strict aria-label."""
     try:
         already_following = page.locator('button[aria-label="Unfollow"], button:has-text("Unfollow"), button:has-text("Following")')
         if await already_following.count() > 0 and await already_following.first.is_visible():
             return
 
-        follow_btn = page.locator('button[data-a-target="follow-button"], button[aria-label="Follow"]').first
-        if await follow_btn.count() == 0:
-            follow_btn = page.get_by_role("button", name="Follow", exact=True)
-
-        await follow_btn.wait_for(state="visible", timeout=12000)
-        await asyncio.sleep(random.uniform(1.2, 2.5))
+        follow_btn = page.locator('button[aria-label="Follow"], button:has-text("Follow")').first
+        await follow_btn.wait_for(state="visible", timeout=15000)
+        await asyncio.sleep(random.uniform(1.5, 2.5))
         await follow_btn.scroll_into_view_if_needed()
         await follow_btn.click()
         print("💜 [AUTO-FOLLOW] Clicked Follow button ONCE!")
@@ -72,7 +69,7 @@ async def type_and_send_chat(
         if await chat_box.count() == 0:
             chat_box = page.locator('div[data-slate-editor="true"]').first
 
-        await chat_box.wait_for(state="visible", timeout=12000)
+        await chat_box.wait_for(state="visible", timeout=15000)
         await asyncio.sleep(random.uniform(1.0, 2.0))
         await chat_box.click()
         await asyncio.sleep(0.4)
@@ -113,13 +110,12 @@ async def launch_stealth_viewer_instance(
             "headless": headless,
             "args": [
                 "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                f"--window-size={profile['screen_width']},{profile['screen_height']}"
+                "--start-maximized",
+                "--disable-infobars",
+                "--no-sandbox"
             ]
         }
         
-        # Attach SOAX residential proxy
         if proxy_info:
             launch_kwargs["proxy"] = {
                 "server": proxy_info["server"],
@@ -130,12 +126,10 @@ async def launch_stealth_viewer_instance(
         browser = await p.chromium.launch(**launch_kwargs)
         
         context = await browser.new_context(
-            user_agent=profile["user_agent"],
-            viewport={"width": profile["screen_width"], "height": profile["screen_height"]},
-            locale=profile["locale"],
-            timezone_id=profile["timezone"],
-            geolocation={"latitude": profile["latitude"], "longitude": profile["longitude"]},
-            permissions=["geolocation"]
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            locale="en-US",
+            timezone_id="America/New_York"
         )
 
         if cookies:
@@ -152,7 +146,7 @@ async def launch_stealth_viewer_instance(
 
         page = await context.new_page()
 
-        # Activate Playwright Stealth on worker page
+        # Activate Playwright Stealth
         stealth = Stealth()
         await stealth.apply_stealth_async(page)
 
