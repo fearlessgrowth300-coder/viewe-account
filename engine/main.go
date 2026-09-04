@@ -255,7 +255,7 @@ func loadProxies(filePath string) ([]ProxyConfig, error) {
 func main() {
 	channelFlag := flag.String("channel", "vinco_vibeslive", "Target Twitch channel username")
 	viewersFlag := flag.Int("viewers", 50, "Total concurrent viewer goroutines")
-	proxiesPath := flag.String("proxies", filepath.Join("..", "data", "proxies.json"), "Path to proxies.json")
+	proxiesPath := flag.String("proxies", "data/proxies.json", "Path to proxies.json")
 	durationFlag := flag.Int("duration", 0, "Duration to run in minutes (0 for infinite)")
 	flag.Parse()
 
@@ -276,8 +276,8 @@ func main() {
 
 	proxies, err := loadProxies(*proxiesPath)
 	if err != nil || len(proxies) == 0 {
-		// Try local relative path
-		proxies, _ = loadProxies("data/proxies.json")
+		// Try parent directory relative path
+		proxies, _ = loadProxies(filepath.Join("..", "data", "proxies.json"))
 	}
 
 	if len(proxies) == 0 {
