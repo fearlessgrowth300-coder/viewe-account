@@ -382,9 +382,19 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 	fmt.Printf("[Worker #%02d] Sending humanized mouse events to follow button...\n", id)
 	err := chromedp.Run(ctx,
 		chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
-		chromedp.Sleep(400*time.Millisecond),
-		chromedp.Click(followButtonSelector, chromedp.ByQuery), // Clicks the button
-		chromedp.Sleep(4*time.Second),                         // CRITICAL: Gives Twitch 4 seconds to register the action
+		chromedp.Sleep(500*time.Millisecond),
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			return chromedp.Evaluate(fmt.Sprintf(`(() => {
+				const btn = document.querySelector('%s');
+				if (!btn) return false;
+				['pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(evt => {
+					btn.dispatchEvent(new MouseEvent(evt, { view: window, bubbles: true, cancelable: true, buttons: 1 }));
+				});
+				btn.click();
+				return true;
+			})()`, followButtonSelector), nil).Do(actCtx)
+		}),
+		chromedp.Sleep(5*time.Second), // Gives Twitch 5 seconds to complete GraphQL follow mutation
 	)
 	if err != nil {
 		return err
@@ -402,7 +412,7 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 
 	_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const followBtn = document.querySelector('button[data-a-target="follow-button"]');
-		const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Unfollow"], button[aria-label="Following"]');
+		const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label*="Unfollow"], button[aria-label*="Following"]');
 		const toastOrModal = document.querySelector('[role="dialog"], .tw-dialog, [data-a-target="tw-toast-container"], .tw-notification, .tw-toast');
 		return {
 			followBtnFound: followBtn !== null,
@@ -433,8 +443,15 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 			chromedp.Reload(),
 			chromedp.Sleep(6*time.Second),
 			chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery),
-			chromedp.Click(followButtonSelector, chromedp.ByQuery),
-			chromedp.Sleep(4*time.Second),
+			chromedp.ActionFunc(func(actCtx context.Context) error {
+				return chromedp.Evaluate(fmt.Sprintf(`(() => {
+					const btn = document.querySelector('%s');
+					if (!btn) return false;
+					btn.click();
+					return true;
+				})()`, followButtonSelector), nil).Do(actCtx)
+			}),
+			chromedp.Sleep(5*time.Second),
 		)
 
 		var recoveryUnfollow bool
@@ -465,13 +482,14 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		return chromedp.Run(ctx, chromedp.Navigate(targetURL))
 	}
 
-	// 1. Inject pre-saved authentication cookies before or during navigation
+	// 1. Inject pre-saved authentication cookies before navigation with explicit URL
 	fmt.Printf("[Worker #%02d] 🔑 Injecting %d session cookies for @%s...\n", id, len(account.Cookies), account.Username)
 	err := chromedp.Run(ctx,
 		network.Enable(),
 		chromedp.ActionFunc(func(actCtx context.Context) error {
 			for _, c := range account.Cookies {
 				expr := network.SetCookie(c.Name, c.Value).
+					WithURL("https://www.twitch.tv").
 					WithDomain(c.Domain).
 					WithPath(c.Path).
 					WithSecure(c.Secure).
@@ -505,6 +523,27 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 			} catch(e) {}
 		`, account.AuthToken, account.AuthToken, account.Username)
 		_ = chromedp.Run(ctx, chromedp.Evaluate(jsInject, nil))
+	}
+
+	// Check if user menu or login is confirmed
+	var checkLogin string
+	_ = chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+			const userMenu = document.querySelector('button[data-a-target="user-menu-toggle"]');
+			if (userMenu) return userMenu.getAttribute('aria-label') || "Logged In User Menu";
+			const loginItem = localStorage.getItem('login');
+			return loginItem ? ("@" + loginItem) : "";
+		})()`, &checkLogin),
+	)
+
+	if checkLogin != "" {
+		fmt.Printf("[Worker #%02d] 👤 Confirmed Authenticated Session: %s\n", id, checkLogin)
+	} else {
+		fmt.Printf("[Worker #%02d] 🔄 Syncing session: Refreshing to lock credentials into Twitch React client...\n", id)
+		_ = chromedp.Run(ctx,
+			chromedp.Reload(),
+			chromedp.Sleep(4*time.Second),
+		)
 	}
 
 	// Dismiss consent banners or mature stream dialogs if present
@@ -650,15 +689,28 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
 	defer cancelBrowser()
 
-	// 1. Stealth Evasion: Inject script on every new document to wipe out navigator.webdriver
+	// 1. Stealth Evasion & Auth Pre-Seed: Inject script on every new document to wipe out navigator.webdriver and pre-seed localStorage
 	_ = chromedp.Run(browserCtx,
 		chromedp.ActionFunc(func(actCtx context.Context) error {
-			stealthJS := `
+			tokenVal := ""
+			usernameVal := ""
+			if account != nil {
+				tokenVal = account.AuthToken
+				usernameVal = account.Username
+			}
+			stealthJS := fmt.Sprintf(`
 				Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 				window.chrome = { runtime: {} };
 				Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 				Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-			`
+				try {
+					if ('%s' !== '') {
+						localStorage.setItem('auth-token', '%s');
+						localStorage.setItem('twilight.oauth.token', '%s');
+						localStorage.setItem('login', '%s');
+					}
+				} catch(e) {}
+			`, tokenVal, tokenVal, tokenVal, usernameVal)
 			_, err := page.AddScriptToEvaluateOnNewDocument(stealthJS).Do(actCtx)
 			return err
 		}),
