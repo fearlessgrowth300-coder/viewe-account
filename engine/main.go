@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -19,12 +20,47 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
 var (
 	activeWorkers int64
+
+	chatMessageBank = []string{
+		"W stream let's gooo 🔥",
+		"insane play right there haha",
+		"stream looking super clean today",
+		"LET'S GOOOO!",
+		"vibes are so good in here 🙌",
+		"ggwp",
+		"that was actually crazy lol",
+		"facts 100%",
+		"no way you survived that",
+		"drop the build/settings!",
+		"yoooo haha",
+	}
 )
+
+type CookieData struct {
+	Name     string  `json:"name"`
+	Value    string  `json:"value"`
+	Domain   string  `json:"domain"`
+	Path     string  `json:"path"`
+	Secure   bool    `json:"secure"`
+	HTTPOnly bool    `json:"httpOnly"`
+	SameSite string  `json:"sameSite"`
+	Expires  float64 `json:"expires"`
+}
+
+type UserAccount struct {
+	Username      string       `json:"username"`
+	Password      string       `json:"password"`
+	AuthToken     string       `json:"auth_token"`
+	Cookies       []CookieData `json:"cookies"`
+	AssignedProxy string       `json:"assigned_proxy"` // Keeps the same IP for the same account
+}
 
 type LocalProxyConfig struct {
 	ID       string `json:"id"`
@@ -231,7 +267,232 @@ func loadProxies(txtPath, jsonPath string, soaxOnly bool) []ProxyEndpoint {
 	return endpoints
 }
 
-func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy ProxyEndpoint, wg *sync.WaitGroup, headless bool) {
+func loadUserAccounts(accountsDir string, filterUsername string) []UserAccount {
+	var accounts []UserAccount
+
+	dir := accountsDir
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		dir = filepath.Join("..", accountsDir)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return accounts
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var acc UserAccount
+		if err := json.Unmarshal(data, &acc); err != nil {
+			continue
+		}
+		if acc.Username == "" {
+			acc.Username = strings.TrimSuffix(entry.Name(), ".json")
+		}
+		if len(acc.Cookies) == 0 && acc.AuthToken == "" {
+			continue
+		}
+		if filterUsername != "" && !strings.EqualFold(acc.Username, filterUsername) {
+			continue
+		}
+		accounts = append(accounts, acc)
+	}
+
+	return accounts
+}
+
+// Strict IP Lock-in: ensures the same account always uses the same proxy endpoint
+func getAccountProxy(account *UserAccount, proxyPool []ProxyEndpoint) ProxyEndpoint {
+	if len(proxyPool) == 0 {
+		return ProxyEndpoint{DisplayName: "Direct", ChromeProxyURL: "", StopBridge: func() {}}
+	}
+	if account != nil && account.AssignedProxy != "" {
+		for _, p := range proxyPool {
+			if strings.Contains(p.DisplayName, account.AssignedProxy) || strings.Contains(p.ChromeProxyURL, account.AssignedProxy) {
+				return p
+			}
+		}
+	}
+	// Stable deterministic hash based on username to guarantee strict IP persistence across runs
+	h := 0
+	if account != nil && account.Username != "" {
+		for _, c := range account.Username {
+			h = (h*31 + int(c)) & 0x7fffffff
+		}
+	}
+	assigned := proxyPool[h%len(proxyPool)]
+	if account != nil {
+		account.AssignedProxy = assigned.DisplayName
+	}
+	return assigned
+}
+
+// performAccountActions manages the lifecycle of an authenticated worker window
+func performAccountActions(ctx context.Context, id int, account *UserAccount, targetURL string, shouldFollow bool) error {
+	if account == nil {
+		fmt.Printf("[Worker #%02d] Navigating to %s (Anonymous Viewer)...\n", id, targetURL)
+		return chromedp.Run(ctx, chromedp.Navigate(targetURL))
+	}
+
+	// 1. Inject pre-saved authentication cookies before or during navigation
+	fmt.Printf("[Worker #%02d] 🔑 Injecting %d session cookies for @%s...\n", id, len(account.Cookies), account.Username)
+	err := chromedp.Run(ctx,
+		network.Enable(),
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			for _, c := range account.Cookies {
+				expr := network.SetCookie(c.Name, c.Value).
+					WithDomain(c.Domain).
+					WithPath(c.Path).
+					WithSecure(c.Secure).
+					WithHTTPOnly(c.HTTPOnly)
+				if c.Expires > 0 {
+					t := cdp.TimeSinceEpoch(time.Unix(int64(c.Expires), 0))
+					expr = expr.WithExpires(&t)
+				}
+				_ = expr.Do(actCtx)
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		fmt.Printf("[Worker #%02d] ⚠️ Cookie injection notice: %v\n", id, err)
+	}
+
+	// 2. Navigate to the channel
+	fmt.Printf("[Worker #%02d] Navigating to stream channel with account session: %s\n", id, targetURL)
+	_ = chromedp.Run(ctx,
+		chromedp.Navigate(targetURL),
+	)
+
+	// Inject LocalStorage tokens so Twitch client recognizes active login state
+	if account.AuthToken != "" {
+		jsInject := fmt.Sprintf(`
+			try {
+				localStorage.setItem('auth-token', '%s');
+				localStorage.setItem('twilight.oauth.token', '%s');
+				localStorage.setItem('login', '%s');
+			} catch(e) {}
+		`, account.AuthToken, account.AuthToken, account.Username)
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsInject, nil))
+	}
+
+	// Dismiss consent banners or mature stream dialogs if present
+	_ = chromedp.Run(ctx,
+		chromedp.Evaluate(`
+			(() => {
+				const matureBtn = document.querySelector('button[data-a-target="player-overlay-mature-accept"], button:has-text("Start Watching")');
+				if (matureBtn) matureBtn.click();
+				const consentBtn = document.querySelector('button[data-a-target="consent-banner-accept"]');
+				if (consentBtn) consentBtn.click();
+			})()
+		`, nil),
+	)
+
+	// 3. Execute Follow Action if requested
+	if shouldFollow {
+		time.Sleep(3 * time.Second)
+		unfollowSelector := `button[data-a-target="unfollow-button"], button[aria-label="Unfollow"]`
+		var isFollowing bool
+		_ = chromedp.Run(ctx,
+			chromedp.Evaluate(fmt.Sprintf(`document.querySelector('%s') !== null`, unfollowSelector), &isFollowing),
+		)
+
+		if isFollowing {
+			fmt.Printf("[Worker #%02d] ℹ️ [Success] Account @%s is ALREADY following this channel.\n", id, account.Username)
+		} else {
+			fmt.Printf("[Worker #%02d] 💜 Locating and clicking the follow button for @%s...\n", id, account.Username)
+			followButtonSelector := `button[data-a-target="follow-button"]`
+
+			followErr := chromedp.Run(ctx,
+				chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery),
+				chromedp.Sleep(1500*time.Millisecond),
+				chromedp.Click(followButtonSelector, chromedp.ByQuery),
+				chromedp.Sleep(2000*time.Millisecond),
+			)
+			if followErr != nil {
+				fmt.Printf("[Worker #%02d] [Warning] Follow button could not be clicked: %v\n", id, followErr)
+			} else {
+				fmt.Printf("[Worker #%02d] 💜 [Success] Follow action executed successfully for @%s.\n", id, account.Username)
+			}
+		}
+	}
+
+	return nil
+}
+
+// simulateLiveChatting injects messages into the active stream interface with jitter
+func simulateLiveChatting(ctx context.Context, id int, account *UserAccount, messages []string) {
+	if account == nil || len(messages) == 0 {
+		return
+	}
+
+	// Staggered Chat Distribution: initial randomized pause so workers do not all speak simultaneously
+	initialStagger := time.Duration(15+rand.Intn(25)) * time.Second
+	fmt.Printf("[Chatter #%02d] ⏳ Staggering initial chat for @%s (%v)...\n", id, account.Username, initialStagger)
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(initialStagger):
+	}
+
+	chatInputSelector := `textarea[data-a-target="chat-input"], [data-a-target="chat-input"], [data-slate-editor="true"]`
+	sendButtonSelector := `button[data-a-target="chat-send-button"]`
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		msg := messages[rand.Intn(len(messages))]
+		fmt.Printf("[Chatter #%02d] 💬 Preparing to send message from @%s: %s\n", id, account.Username, msg)
+
+		// Dismiss rules or modal if present
+		_ = chromedp.Run(ctx,
+			chromedp.Evaluate(`
+				(() => {
+					const btn = document.querySelector('button[data-a-target="chat-rules-ok-button"], button[data-a-target="player-overlay-mature-accept"], button[data-a-target="consent-banner-accept"]');
+					if (btn) btn.click();
+				})()
+			`, nil),
+		)
+
+		err := chromedp.Run(ctx,
+			chromedp.WaitVisible(chatInputSelector, chromedp.ByQuery),
+			chromedp.Focus(chatInputSelector, chromedp.ByQuery),
+			chromedp.SendKeys(chatInputSelector, msg, chromedp.ByQuery),
+			chromedp.Sleep(500*time.Millisecond),
+			chromedp.Click(sendButtonSelector, chromedp.ByQuery),
+		)
+
+		if err != nil {
+			// Fallback: send Enter key into input
+			_ = chromedp.Run(ctx, chromedp.SendKeys(chatInputSelector, "\r", chromedp.ByQuery))
+			fmt.Printf("[Chatter #%02d] Dispatch notice: %v\n", id, err)
+		} else {
+			fmt.Printf("[Chatter #%02d] 🎉 [Chat Sent] @%s: \"%s\"\n", id, account.Username, msg)
+		}
+
+		// Apply dynamic jitter (35 to 65 seconds) so accounts do not chat on a fixed interval
+		jitterDelay := 35*time.Second + time.Duration(rand.Intn(30))*time.Second
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(jitterDelay):
+		}
+	}
+}
+
+func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy ProxyEndpoint, account *UserAccount, shouldFollow bool, shouldChat bool, wg *sync.WaitGroup, headless bool) {
 	defer wg.Done()
 
 	proxyURL := proxy.ChromeProxyURL
@@ -239,7 +500,12 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 	if displayName == "" {
 		displayName = "Direct"
 	}
-	fmt.Printf("[Worker #%02d] 🌐 Launching Chrome (Headless: %v) via: %s\n", id, headless, displayName)
+
+	accLabel := "Anonymous Viewer"
+	if account != nil {
+		accLabel = fmt.Sprintf("@%s", account.Username)
+	}
+	fmt.Printf("[Worker #%02d] 🌐 Launching Chrome (Account: %s | Headless: %v) via: %s\n", id, accLabel, headless, displayName)
 
 	execOpts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", headless),
@@ -268,11 +534,13 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
 	defer cancelBrowser()
 
-	fmt.Printf("[Worker #%02d] Navigating to %s...\n", id, targetURL)
-	// Issue navigation without aggressive timeout so Chrome keeps loading naturally
-	_ = chromedp.Run(browserCtx,
-		chromedp.Navigate(targetURL),
-	)
+	// Execute account session loading, navigation, and follow action
+	_ = performAccountActions(browserCtx, id, account, targetURL, shouldFollow)
+
+	// If authenticated and chat is enabled, start live chat loop in background
+	if account != nil && shouldChat {
+		go simulateLiveChatting(browserCtx, id, account, chatMessageBank)
+	}
 
 	atomic.AddInt64(&activeWorkers, 1)
 	defer atomic.AddInt64(&activeWorkers, -1)
@@ -280,7 +548,7 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 	current := atomic.LoadInt64(&activeWorkers)
 	fmt.Printf("[Worker #%02d] 💚 Chrome window open and permanently locked! Active Windows: %d\n", id, current)
 
-	// 5. Keep-Alive Loop: Window stays open permanently until user interrupts (Ctrl+C)
+	// Keep-Alive Loop: Window stays open permanently until Ctrl+C
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
@@ -291,7 +559,6 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 			return
 		case <-ticker.C:
 			var offlineMessage string
-			// Soft check if stream ended or went offline (does NOT close the window)
 			_ = chromedp.Run(browserCtx,
 				chromedp.Evaluate(`document.querySelector(".offline-embed, .stream-ended-indicator") ? "offline" : "live"`, &offlineMessage),
 			)
@@ -304,9 +571,13 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 }
 
 func main() {
-	channelFlag := flag.String("channel", "agenciapx", "Target Twitch channel username")
+	channelFlag := flag.String("channel", "reallweston", "Target Twitch channel username")
 	urlFlag := flag.String("url", "", "Custom target URL")
-	workersFlag := flag.Int("workers", 2, "Number of concurrent browser instances (Default: 2)")
+	workersFlag := flag.Int("workers", 1, "Number of concurrent browser instances (Default: 1)")
+	accountFlag := flag.String("account", "", "Specific account username to use (Default: empty = rotate all available)")
+	accountsDirFlag := flag.String("accounts-dir", "data/accounts", "Directory containing account JSON files")
+	followFlag := flag.Bool("follow", true, "Execute follow action for authenticated accounts (Default: true)")
+	chatFlag := flag.Bool("chat", true, "Execute live chat actions with staggered human timing (Default: true)")
 	proxiesPath := flag.String("proxies", "proxies.txt", "Path to proxies.txt")
 	jsonPath := flag.String("json-proxies", "data/proxies.json", "Path to data/proxies.json")
 	sessionFlag := flag.Int("session-duration", 15, "Session duration per browser in minutes")
@@ -331,10 +602,12 @@ func main() {
 	}
 
 	fmt.Println("==================================================================")
-	fmt.Println("⚡ GO CHROMEDP ENGINE (VISIBLE BROWSER + SOAX AUTH TUNNEL)")
-	fmt.Printf("   Target Stream:     %s\n", targetStream)
-	fmt.Printf("   Active Workers:    %d windows\n", *workersFlag)
-	fmt.Printf("   Display Mode:      %s\n", modeStr)
+	fmt.Println("⚡ GO CHROMEDP ENGINE (AUTHENTICATED SESSIONS, FOLLOW & CHAT)")
+	fmt.Printf("   Target Stream:      %s\n", targetStream)
+	fmt.Printf("   Active Workers:     %d windows\n", *workersFlag)
+	fmt.Printf("   Display Mode:       %s\n", modeStr)
+	fmt.Printf("   Auto-Follow Mode:   %v\n", *followFlag)
+	fmt.Printf("   Live Chat Mode:     %v\n", *chatFlag)
 	fmt.Println("   Window Persistence: Permanently open (until Ctrl+C)")
 	fmt.Println("==================================================================")
 
@@ -363,6 +636,22 @@ func main() {
 		}
 	}()
 
+	// Load authenticated accounts
+	accDir := *accountsDirFlag
+	if _, err := os.Stat(accDir); os.IsNotExist(err) {
+		accDir = filepath.Join("..", "data", "accounts")
+	}
+	accounts := loadUserAccounts(accDir, *accountFlag)
+	if len(accounts) > 0 {
+		fmt.Printf("🔑 Loaded %d Authenticated Accounts from %s:\n", len(accounts), accDir)
+		for _, a := range accounts {
+			fmt.Printf("   • @%s (%d cookies)\n", a.Username, len(a.Cookies))
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("ℹ️  No authenticated accounts found (Running in anonymous viewer mode).\n")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	if *totalDurationFlag > 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(*totalDurationFlag)*time.Minute)
@@ -375,8 +664,20 @@ func main() {
 
 	for w := 1; w <= *workersFlag; w++ {
 		wg.Add(1)
-		assignedProxy := proxyPool[(w-1)%len(proxyPool)]
-		go runBrowserWorker(ctx, w, targetStream, assignedProxy, &wg, *headlessFlag)
+
+		var acc *UserAccount
+		if len(accounts) > 0 {
+			a := accounts[(w-1)%len(accounts)]
+			acc = &a
+		}
+
+		// Strict IP Lock-in: deterministically bind account to consistent proxy
+		assignedProxy := getAccountProxy(acc, proxyPool)
+		if acc != nil {
+			fmt.Printf("[Security] 🔒 Strict IP Lock-in: @%s bound to %s\n", acc.Username, assignedProxy.DisplayName)
+		}
+
+		go runBrowserWorker(ctx, w, targetStream, assignedProxy, acc, *followFlag, *chatFlag, &wg, *headlessFlag)
 
 		if w < *workersFlag {
 			time.Sleep(3 * time.Second) // Stagger window launches by 3 seconds
