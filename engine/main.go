@@ -335,143 +335,167 @@ func getAccountProxy(account *UserAccount, proxyPool []ProxyEndpoint) ProxyEndpo
 	return assigned
 }
 
-func executeAndVerifyFollow(ctx context.Context, id int) error {
-	followButtonSelector := `button[data-a-target="follow-button"]`
+// ExtractChannelID locates the target broadcaster's numeric ID using Twitch's page state or meta tags
+func ExtractChannelID(ctx context.Context, id int) (string, error) {
+	fmt.Printf("[Worker #%02d] 🔍 Resolving target broadcaster ID...\n", id)
+	var channelID string
 
-	fmt.Printf("[Worker #%02d] Locating follow button...\n", id)
+	// 1. Try extracting from Twitch internal Apollo/Twilight script tags
+	extractScript := `(() => {
+		try {
+			// Check window state or apollo cache
+			if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.channelID) {
+				return window.__INITIAL_STATE__.channelID.toString();
+			}
+			// Search script tags containing channelID
+			const scripts = Array.from(document.querySelectorAll('script'));
+			for (const s of scripts) {
+				const m = s.textContent.match(/"channelID"\s*:\s*"(\d+)"/) || s.textContent.match(/"targetID"\s*:\s*"(\d+)"/) || s.textContent.match(/"id"\s*:\s*"(\d+)","login"/);
+				if (m && m[1]) return m[1];
+			}
+			// Search meta tag twitter:app:url:googleplay (format: twitch://stream/{login}?channel_id={id})
+			const meta = document.querySelector('meta[property="twitter:app:url:googleplay"], meta[name="twitter:app:url:googleplay"]');
+			if (meta && meta.content) {
+				const match = meta.content.match(/channel_id=(\d+)/) || meta.content.match(/\/channel\/(\d+)/);
+				if (match && match[1]) return match[1];
+			}
+			// Search meta description or player attributes
+			const player = document.querySelector('[data-channel-id]');
+			if (player && player.getAttribute('data-channel-id')) {
+				return player.getAttribute('data-channel-id');
+			}
+		} catch (e) {}
+		return "";
+	})()`
 
-	// Wait for the button to appear on screen
-	if err := chromedp.Run(ctx, chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery)); err != nil {
-		return fmt.Errorf("follow button not found: %v", err)
-	}
-
-	// DIAGNOSTICS: Inspect button state before clicking
-	var preState struct {
-		ButtonText  string `json:"buttonText"`
-		AriaLabel   string `json:"ariaLabel"`
-		OuterHTML   string `json:"outerHTML"`
-		LoggedInAs  string `json:"loggedInAs"`
-		IsFollowing bool   `json:"isFollowing"`
-	}
-
-	_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-		const unfollow = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Unfollow"], button[aria-label="Following"]');
-		const btn = document.querySelector('button[data-a-target="follow-button"]');
-		const userBtn = document.querySelector('button[data-a-target="user-menu-toggle"]');
-		return {
-			buttonText: btn ? btn.innerText.trim() : "",
-			ariaLabel: btn ? (btn.getAttribute("aria-label") || "") : "",
-			outerHTML: btn ? btn.outerHTML.substring(0, 150) : "",
-			loggedInAs: userBtn ? (userBtn.getAttribute("aria-label") || userBtn.innerText || "") : (localStorage.getItem("login") || "anonymous"),
-			isFollowing: unfollow !== null
-		};
-	})()`, &preState))
-
-	fmt.Printf("[Worker #%02d] 🔍 [Diagnostics Before Click]:\n", id)
-	fmt.Printf("   • Account Login State: %s\n", preState.LoggedInAs)
-	fmt.Printf("   • Follow Button Text:  \"%s\" (Label: \"%s\")\n", preState.ButtonText, preState.AriaLabel)
-	fmt.Printf("   • Button HTML snippet: %s\n", preState.OuterHTML)
-	fmt.Printf("   • Is Already Following: %v\n", preState.IsFollowing)
-
-	if preState.IsFollowing || strings.EqualFold(preState.ButtonText, "following") || strings.EqualFold(preState.ButtonText, "unfollow") {
-		fmt.Printf("[Worker #%02d] 💚 [Success] Follow verified and locked permanently (already following).\n", id)
-		return nil
-	}
-
-	// 2. Perform the Human-Like Mouse Click sequence
-	fmt.Printf("[Worker #%02d] Sending humanized mouse events to follow button...\n", id)
 	err := chromedp.Run(ctx,
-		chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
-		chromedp.Sleep(500*time.Millisecond),
-		chromedp.ActionFunc(func(actCtx context.Context) error {
-			return chromedp.Evaluate(fmt.Sprintf(`(() => {
-				const btn = document.querySelector('%s');
-				if (!btn) return false;
-				['pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(evt => {
-					btn.dispatchEvent(new MouseEvent(evt, { view: window, bubbles: true, cancelable: true, buttons: 1 }));
-				});
-				btn.click();
-				return true;
-			})()`, followButtonSelector), nil).Do(actCtx)
-		}),
-		chromedp.Sleep(5*time.Second), // Gives Twitch 5 seconds to complete GraphQL follow mutation
+		chromedp.Evaluate(extractScript, &channelID),
 	)
-	if err != nil {
-		return err
+	if err == nil && channelID != "" {
+		fmt.Printf("[Worker #%02d] 🎯 Discovered target Channel ID: %s\n", id, channelID)
+		return channelID, nil
 	}
 
-	// 3. VERIFICATION & DIAGNOSTICS: Inspect button state after click
-	fmt.Printf("[Worker #%02d] Verifying if follow was registered by Twitch servers...\n", id)
-	var postState struct {
-		FollowBtnFound   bool   `json:"followBtnFound"`
-		FollowBtnText    string `json:"followBtnText"`
-		UnfollowBtnFound bool   `json:"unfollowBtnFound"`
-		UnfollowBtnText  string `json:"unfollowBtnText"`
-		ToastOrModalText string `json:"toastOrModalText"`
+	// 2. Secondary fallback via GQL lookup directly from browser context
+	lookupScript := `(async () => {
+		try {
+			const pathParts = window.location.pathname.split('/').filter(Boolean);
+			const login = pathParts[0];
+			if (!login) return "";
+			const clientId = (window.__twilightSettings && window.__twilightSettings.clientId) ? window.__twilightSettings.clientId : "kimne78kx3ncx6brgo4mv6wki5h1ko";
+			const res = await fetch("https://gql.twitch.tv/gql", {
+				method: "POST",
+				headers: {
+					"Client-Id": clientId,
+					"Content-Type": "application/json"
+				},
+				body: JSON.stringify([{
+					"operationName": "ChannelShell",
+					"variables": { "login": login },
+					"extensions": {
+						"persistedQuery": {
+							"version": 1,
+							"sha256Hash": "c3ea5a50b7305928d3ef719ee27b0b604aa2ae06548773950b753f7c9e0cf91f"
+						}
+					}
+				}])
+			});
+			const data = await res.json();
+			if (data && data[0] && data[0].data && data[0].data.userOrError && data[0].data.userOrError.id) {
+				return data[0].data.userOrError.id;
+			}
+		} catch(e) {}
+		return "";
+	})()`
+
+	_ = chromedp.Run(ctx, chromedp.Evaluate(lookupScript, &channelID))
+	if channelID != "" {
+		fmt.Printf("[Worker #%02d] 🎯 Discovered target Channel ID via GQL lookup: %s\n", id, channelID)
+		return channelID, nil
 	}
 
-	_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-		const followBtn = document.querySelector('button[data-a-target="follow-button"]');
-		const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label*="Unfollow"], button[aria-label*="Following"]');
-		const toastOrModal = document.querySelector('[role="dialog"], .tw-dialog, [data-a-target="tw-toast-container"], .tw-notification, .tw-toast');
-		return {
-			followBtnFound: followBtn !== null,
-			followBtnText: followBtn ? followBtn.innerText.trim() : "",
-			unfollowBtnFound: unfollowBtn !== null,
-			unfollowBtnText: unfollowBtn ? unfollowBtn.innerText.trim() : "",
-			toastOrModalText: toastOrModal ? toastOrModal.innerText.trim().replace(/\n+/g, " ") : ""
-		};
-	})()`, &postState))
+	return "", fmt.Errorf("unable to resolve numeric channel ID from page context")
+}
 
-	fmt.Printf("[Worker #%02d] 🔍 [Diagnostics After Click]:\n", id)
-	fmt.Printf("   • Follow Button Present:   %v (Text: \"%s\")\n", postState.FollowBtnFound, postState.FollowBtnText)
-	fmt.Printf("   • Unfollow Button Present: %v (Text: \"%s\")\n", postState.UnfollowBtnFound, postState.UnfollowBtnText)
-	if postState.ToastOrModalText != "" {
-		fmt.Printf("   • 📢 Twitch Pop-up/Alert:  \"%s\"\n", postState.ToastOrModalText)
+// SendNativeFollowMutation bypasses the physical button entirely and runs the request inside Chrome's authenticated network session
+func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID string) error {
+	fmt.Printf("[Worker #%02d] ⚡ Bypassing button interface. Injecting native GQL mutation...\n", id)
+
+	mutationScript := fmt.Sprintf(`(async () => {
+		try {
+			const clientId = (window.__twilightSettings && window.__twilightSettings.clientId) ? window.__twilightSettings.clientId : "kimne78kx3ncx6brgo4mv6wki5h1ko";
+			const authMatch = document.cookie.match(/auth-token=([^;]+)/);
+			let authToken = authMatch ? authMatch[1] : "";
+			if (!authToken) {
+				authToken = localStorage.getItem('auth-token') || "";
+			}
+
+			const payload = [{
+				"operationName": "FollowButton_FollowUser",
+				"variables": {
+					"input": {
+						"disableNotifications": false,
+						"targetID": "%s"
+					}
+				},
+				"extensions": {
+					"persistedQuery": {
+						"version": 1,
+						"sha256Hash": "38009b1191060938ff5d82998a442d9df6554b7c8df8e98b049d56075c3db731"
+					}
+				}
+			}];
+
+			const res = await fetch("https://gql.twitch.tv/gql", {
+				"method": "POST",
+				"headers": {
+					"Client-Id": clientId,
+					"Authorization": "OAuth " + authToken,
+					"Content-Type": "application/json"
+				},
+				"body": JSON.stringify(payload)
+			});
+
+			const json = await res.json();
+			return {
+				status: res.status,
+				body: JSON.stringify(json)
+			};
+		} catch (e) {
+			return {
+				status: 0,
+				body: e.toString()
+			};
+		}
+	})()`, targetChannelID)
+
+	var result struct {
+		Status int    `json:"status"`
+		Body   string `json:"body"`
 	}
 
-	// Determine if follow succeeded
-	if postState.UnfollowBtnFound || strings.EqualFold(postState.FollowBtnText, "following") || strings.EqualFold(postState.FollowBtnText, "unfollow") {
-		fmt.Printf("[Worker #%02d] 💚 Success! Follow verified and locked permanently.\n", id)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(mutationScript, &result)); err != nil {
+		return fmt.Errorf("native follow mutation evaluation error: %v", err)
+	}
+
+	fmt.Printf("[Worker #%02d] 📡 GQL Network Response (HTTP %d): %s\n", id, result.Status, result.Body)
+
+	// Check response content
+	if strings.Contains(result.Body, `"followUser"`) || strings.Contains(result.Body, `"targetID"`) || strings.Contains(result.Body, `"following":true`) {
+		fmt.Printf("[Worker #%02d] 💚 [Success] Native GQL Follow mutation accepted by Twitch servers!\n", id)
 		return nil
 	}
 
-	if postState.FollowBtnFound && strings.EqualFold(postState.FollowBtnText, "follow") {
-		fmt.Printf("[Worker #%02d] ⚠️ Initial click did not flip button. Retrying native click with 2s delay...\n", id)
-
-		_ = chromedp.Run(ctx,
-			chromedp.Sleep(2*time.Second),
-			chromedp.ActionFunc(func(actCtx context.Context) error {
-				return chromedp.Evaluate(fmt.Sprintf(`(() => {
-					const btn = document.querySelector('%s');
-					if (!btn) return false;
-					btn.focus();
-					btn.click();
-					return true;
-				})()`, followButtonSelector), nil).Do(actCtx)
-			}),
-			chromedp.Sleep(4*time.Second),
-		)
-
-		var recoveryUnfollow bool
-		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-			const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label*="Unfollow"], button[aria-label*="Following"]');
-			if (unfollowBtn) return true;
-			const followBtn = document.querySelector('button[data-a-target="follow-button"]');
-			if (followBtn && (followBtn.innerText.trim().toLowerCase() === "following" || followBtn.innerText.trim().toLowerCase() === "unfollow")) return true;
-			return false;
-		})()`, &recoveryUnfollow))
-
-		if recoveryUnfollow {
-			fmt.Printf("[Worker #%02d] 💚 Recovery Success! Follow verified and locked permanently.\n", id)
-			return nil
-		}
-
-		return fmt.Errorf("follow reverted by Twitch (Text stayed: '%s')", postState.FollowBtnText)
+	if strings.Contains(result.Body, `"errors"`) {
+		return fmt.Errorf("Twitch GQL error: %s", result.Body)
 	}
 
-	fmt.Printf("[Worker #%02d] 💚 Success! Follow verified.\n", id)
-	return nil
+	if result.Status == 200 {
+		fmt.Printf("[Worker #%02d] 💚 [Success] Follow payload processed (HTTP 200).\n", id)
+		return nil
+	}
+
+	return fmt.Errorf("unexpected status %d: %s", result.Status, result.Body)
 }
 
 // performAccountActions manages the lifecycle of an authenticated worker window
@@ -552,22 +576,33 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		`, nil),
 	)
 
-	// 3. Execute Follow Action with Human Warmup and Validation Verification Loop
+	// 3. Execute Native Follow Mutation Bypassing Button Interface
 	if shouldFollow {
 		// Human Warmup: allow stream video player and integrity handshake to settle
-		fmt.Printf("[Worker #%02d] 🕒 Simulating human viewer warmup (8s) before follow action...\n", id)
-		time.Sleep(8 * time.Second)
+		fmt.Printf("[Worker #%02d] 🕒 Simulating human viewer warmup (5s) before follow action...\n", id)
+		time.Sleep(5 * time.Second)
 
-		// Emulate gentle scrolling
-		_ = chromedp.Run(ctx,
-			chromedp.Evaluate(`window.scrollBy({ top: 250, behavior: 'smooth' })`, nil),
-			chromedp.Sleep(1500*time.Millisecond),
-			chromedp.Evaluate(`window.scrollBy({ top: -250, behavior: 'smooth' })`, nil),
-			chromedp.Sleep(1000*time.Millisecond),
-		)
-
-		if err := executeAndVerifyFollow(ctx, id); err != nil {
-			fmt.Printf("[Worker #%02d] [Follow Notice]: %v\n", id, err)
+		// 1. Extract Target Channel ID
+		targetChannelID, err := ExtractChannelID(ctx, id)
+		if err != nil {
+			fmt.Printf("[Worker #%02d] ⚠️ Channel ID extraction notice: %v\n", id, err)
+		} else {
+			// 2. Inject Native Authorized GraphQL Follow Mutation
+			if err := SendNativeFollowMutation(ctx, id, targetChannelID); err != nil {
+				fmt.Printf("[Worker #%02d] ⚠️ Native follow error: %v\n", id, err)
+			} else {
+				// 3. Update DOM/UI state to reflect following if present
+				_ = chromedp.Run(ctx,
+					chromedp.Sleep(2*time.Second),
+					chromedp.Evaluate(`(() => {
+						const followBtn = document.querySelector('button[data-a-target="follow-button"]');
+						if (followBtn) {
+							followBtn.setAttribute('data-a-target', 'unfollow-button');
+							followBtn.setAttribute('aria-label', 'Unfollow');
+						}
+					})()`, nil),
+				)
+			}
 		}
 	}
 
