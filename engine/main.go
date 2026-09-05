@@ -446,20 +446,37 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 				}
 			}];
 
+			// Extract Client-Integrity token and Device ID from page memory if present
+			let integrityToken = "";
+			try {
+				if (window.__twilightSettings && window.__twilightSettings.integrityToken) {
+					integrityToken = window.__twilightSettings.integrityToken;
+				}
+			} catch(e) {}
+
+			let deviceId = "";
+			const devMatch = document.cookie.match(/unique_id=([^;]+)/);
+			if (devMatch) deviceId = devMatch[1];
+
+			const headers = {
+				"Client-Id": clientId,
+				"Authorization": "OAuth " + authToken,
+				"Content-Type": "application/json"
+			};
+			if (integrityToken) headers["Client-Integrity"] = integrityToken;
+			if (deviceId) headers["X-Device-Id"] = deviceId;
+
 			const res = await fetch("https://gql.twitch.tv/gql", {
 				"method": "POST",
-				"headers": {
-					"Client-Id": clientId,
-					"Authorization": "OAuth " + authToken,
-					"Content-Type": "application/json"
-				},
+				"headers": headers,
+				"credentials": "include",
 				"body": JSON.stringify(payload)
 			});
 
-			const json = await res.json();
+			const text = await res.text();
 			return {
 				status: res.status,
-				body: JSON.stringify(json)
+				body: text
 			};
 		} catch (e) {
 			return {
@@ -477,6 +494,11 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 	if err := chromedp.Run(ctx, chromedp.Evaluate(mutationScript, &result)); err != nil {
 		return fmt.Errorf("native follow mutation evaluation error: %v", err)
 	}
+
+	fmt.Printf("\n[Worker #%02d] ================= GQL FOLLOW DIAGNOSTICS ================\n", id)
+	fmt.Printf("   • Transport HTTP Status: %d\n", result.Status)
+	fmt.Printf("   • Full Server Response:  %s\n", result.Body)
+	fmt.Printf("   ==================================================================\n\n")
 
 	fmt.Printf("[Worker #%02d] 📡 GQL Network Response (HTTP %d): %s\n", id, result.Status, result.Body)
 
@@ -593,7 +615,7 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 			} else {
 				// 3. Update DOM/UI state to reflect following if present
 				_ = chromedp.Run(ctx,
-					chromedp.Sleep(2*time.Second),
+					chromedp.Sleep(1*time.Second),
 					chromedp.Evaluate(`(() => {
 						const followBtn = document.querySelector('button[data-a-target="follow-button"]');
 						if (followBtn) {
@@ -602,6 +624,29 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 						}
 					})()`, nil),
 				)
+
+				// 4. Server-Side Persistence Verification (Wait 6 seconds to see if Twitch Apollo cache reverts)
+				fmt.Printf("[Worker #%02d] ⏳ Verifying server-side persistence (waiting 6s for Twitch cache sync)...\n", id)
+				time.Sleep(6 * time.Second)
+
+				var verifyStatus struct {
+					ButtonLabel string `json:"buttonLabel"`
+					IsFollowing bool   `json:"isFollowing"`
+				}
+				_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+					const btn = document.querySelector('button[data-a-target="follow-button"], button[data-a-target="unfollow-button"], button[aria-label="Following"], button[aria-label="Follow"]');
+					const unfollow = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Following"], button[aria-label="Unfollow"]');
+					return {
+						buttonLabel: btn ? (btn.innerText.trim() || btn.getAttribute('aria-label') || "") : "",
+						isFollowing: unfollow !== null
+					};
+				})()`, &verifyStatus))
+
+				if strings.EqualFold(verifyStatus.ButtonLabel, "follow") && !verifyStatus.IsFollowing {
+					fmt.Printf("[Worker #%02d] ⚠️ [Server Rollback Detected]: Twitch server did NOT persist the follow (Button reverted to '%s').\n", id, verifyStatus.ButtonLabel)
+				} else {
+					fmt.Printf("[Worker #%02d] 💚 [Verified]: Follow state successfully persisted on Twitch server!\n", id)
+				}
 			}
 		}
 	}
