@@ -22,6 +22,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
 
@@ -628,6 +629,8 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("disable-infobars", true),
 		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
 	)
 
@@ -646,6 +649,29 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
 	defer cancelBrowser()
+
+	// 1. Stealth Evasion: Inject script on every new document to wipe out navigator.webdriver
+	_ = chromedp.Run(browserCtx,
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			stealthJS := `
+				Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+				window.chrome = { runtime: {} };
+				Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+				Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+			`
+			_, err := page.AddScriptToEvaluateOnNewDocument(stealthJS).Do(actCtx)
+			return err
+		}),
+	)
+
+	// 2. Live Network Diagnostics: Listen to Twitch GQL responses
+	chromedp.ListenTarget(browserCtx, func(ev interface{}) {
+		if res, ok := ev.(*network.EventResponseReceived); ok {
+			if strings.Contains(res.Response.URL, "gql.twitch.tv") {
+				fmt.Printf("[Worker #%02d Network] 📡 Twitch GQL Response: HTTP %d (%s)\n", id, int(res.Response.Status), res.Response.StatusText)
+			}
+		}
+	})
 
 	// Execute account session loading, navigation, and follow action
 	_ = performAccountActions(browserCtx, id, account, targetURL, shouldFollow)
