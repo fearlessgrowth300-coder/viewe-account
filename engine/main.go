@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -335,12 +337,41 @@ func getAccountProxy(account *UserAccount, proxyPool []ProxyEndpoint) ProxyEndpo
 	return assigned
 }
 
-// ExtractChannelID locates the target broadcaster's numeric ID using Twitch's page state or meta tags
-func ExtractChannelID(ctx context.Context, id int) (string, error) {
-	fmt.Printf("[Worker #%02d] 🔍 Resolving target broadcaster ID...\n", id)
+// ExtractChannelID locates the target broadcaster's numeric ID using Twitch's page state, in-tab fetch, or direct GQL query
+func ExtractChannelID(ctx context.Context, id int, channelLogin string) (string, error) {
+	fmt.Printf("[Worker #%02d] 🔍 Resolving target broadcaster ID for '%s'...\n", id, channelLogin)
 	var channelID string
 
-	// 1. Try extracting from Twitch internal Apollo/Twilight script tags
+	// 1. In-browser GQL query: query user(login: "...") { id } using the page's fetch context
+	inTabGQL := fmt.Sprintf(`(async () => {
+		try {
+			const clientId = (window.__twilightSettings && window.__twilightSettings.clientId) ? window.__twilightSettings.clientId : "kimne78kx3ncx6brgo4mv6wki5h1ko";
+			const res = await fetch("https://gql.twitch.tv/gql", {
+				method: "POST",
+				headers: {
+					"Client-Id": clientId,
+					"Content-Type": "application/json"
+				},
+				body: JSON.stringify([{
+					"query": "query($login: String!) { user(login: $login) { id login displayName } }",
+					"variables": { "login": "%s" }
+				}])
+			});
+			const data = await res.json();
+			if (data && data[0] && data[0].data && data[0].data.user && data[0].data.user.id) {
+				return data[0].data.user.id;
+			}
+		} catch(e) {}
+		return "";
+	})()`, channelLogin)
+
+	_ = chromedp.Run(ctx, chromedp.Evaluate(inTabGQL, &channelID))
+	if channelID != "" {
+		fmt.Printf("[Worker #%02d] 🎯 Discovered target Channel ID via in-tab GQL: %s\n", id, channelID)
+		return channelID, nil
+	}
+
+	// 2. Try extracting from Twitch internal Apollo/Twilight script tags or metadata
 	extractScript := `(() => {
 		try {
 			// Check window state or apollo cache
@@ -359,7 +390,7 @@ func ExtractChannelID(ctx context.Context, id int) (string, error) {
 				const match = meta.content.match(/channel_id=(\d+)/) || meta.content.match(/\/channel\/(\d+)/);
 				if (match && match[1]) return match[1];
 			}
-			// Search meta description or player attributes
+			// Search player or container attributes
 			const player = document.querySelector('[data-channel-id]');
 			if (player && player.getAttribute('data-channel-id')) {
 				return player.getAttribute('data-channel-id');
@@ -368,53 +399,40 @@ func ExtractChannelID(ctx context.Context, id int) (string, error) {
 		return "";
 	})()`
 
-	err := chromedp.Run(ctx,
-		chromedp.Evaluate(extractScript, &channelID),
-	)
-	if err == nil && channelID != "" {
-		fmt.Printf("[Worker #%02d] 🎯 Discovered target Channel ID: %s\n", id, channelID)
-		return channelID, nil
-	}
-
-	// 2. Secondary fallback via GQL lookup directly from browser context
-	lookupScript := `(async () => {
-		try {
-			const pathParts = window.location.pathname.split('/').filter(Boolean);
-			const login = pathParts[0];
-			if (!login) return "";
-			const clientId = (window.__twilightSettings && window.__twilightSettings.clientId) ? window.__twilightSettings.clientId : "kimne78kx3ncx6brgo4mv6wki5h1ko";
-			const res = await fetch("https://gql.twitch.tv/gql", {
-				method: "POST",
-				headers: {
-					"Client-Id": clientId,
-					"Content-Type": "application/json"
-				},
-				body: JSON.stringify([{
-					"operationName": "ChannelShell",
-					"variables": { "login": login },
-					"extensions": {
-						"persistedQuery": {
-							"version": 1,
-							"sha256Hash": "c3ea5a50b7305928d3ef719ee27b0b604aa2ae06548773950b753f7c9e0cf91f"
-						}
-					}
-				}])
-			});
-			const data = await res.json();
-			if (data && data[0] && data[0].data && data[0].data.userOrError && data[0].data.userOrError.id) {
-				return data[0].data.userOrError.id;
-			}
-		} catch(e) {}
-		return "";
-	})()`
-
-	_ = chromedp.Run(ctx, chromedp.Evaluate(lookupScript, &channelID))
+	_ = chromedp.Run(ctx, chromedp.Evaluate(extractScript, &channelID))
 	if channelID != "" {
-		fmt.Printf("[Worker #%02d] 🎯 Discovered target Channel ID via GQL lookup: %s\n", id, channelID)
+		fmt.Printf("[Worker #%02d] 🎯 Discovered target Channel ID via page DOM/Metadata: %s\n", id, channelID)
 		return channelID, nil
 	}
 
-	return "", fmt.Errorf("unable to resolve numeric channel ID from page context")
+	// 3. Fallback direct HTTP GQL request from Go engine
+	if channelLogin != "" {
+		gqlPayload := []byte(fmt.Sprintf(`[{"query":"query($login: String!) { user(login: $login) { id login } }","variables":{"login":"%s"}}]`, channelLogin))
+		req, err := http.NewRequestWithContext(ctx, "POST", "https://gql.twitch.tv/gql", bytes.NewBuffer(gqlPayload))
+		if err == nil {
+			req.Header.Set("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko")
+			req.Header.Set("Content-Type", "application/json")
+			client := &http.Client{Timeout: 8 * time.Second}
+			resp, err := client.Do(req)
+			if err == nil {
+				defer resp.Body.Close()
+				var gqlResp []struct {
+					Data struct {
+						User struct {
+							ID string `json:"id"`
+						} `json:"user"`
+					} `json:"data"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err == nil && len(gqlResp) > 0 && gqlResp[0].Data.User.ID != "" {
+					channelID = gqlResp[0].Data.User.ID
+					fmt.Printf("[Worker #%02d] 🎯 Discovered target Channel ID via direct Twitch GQL endpoint: %s\n", id, channelID)
+					return channelID, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("unable to resolve numeric channel ID for '%s'", channelLogin)
 }
 
 // SendNativeFollowMutation bypasses the physical button entirely and runs the request inside Chrome's authenticated network session
@@ -604,8 +622,13 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		fmt.Printf("[Worker #%02d] 🕒 Simulating human viewer warmup (5s) before follow action...\n", id)
 		time.Sleep(5 * time.Second)
 
-		// 1. Extract Target Channel ID
-		targetChannelID, err := ExtractChannelID(ctx, id)
+		// 1. Extract Target Channel Login Name from Target URL
+		channelLogin := targetURL
+		channelLogin = strings.TrimPrefix(channelLogin, "https://www.twitch.tv/")
+		channelLogin = strings.TrimPrefix(channelLogin, "https://twitch.tv/")
+		channelLogin = strings.Trim(channelLogin, "/")
+
+		targetChannelID, err := ExtractChannelID(ctx, id, channelLogin)
 		if err != nil {
 			fmt.Printf("[Worker #%02d] ⚠️ Channel ID extraction notice: %v\n", id, err)
 		} else {
