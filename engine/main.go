@@ -485,10 +485,9 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 			if (deviceId) headers["X-Device-Id"] = deviceId;
 
 			const res = await fetch("https://gql.twitch.tv/gql", {
-				"method": "POST",
-				"headers": headers,
-				"credentials": "include",
-				"body": JSON.stringify(payload)
+				method: "POST",
+				headers: headers,
+				body: JSON.stringify(payload)
 			});
 
 			const text = await res.text();
@@ -499,7 +498,7 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 		} catch (e) {
 			return {
 				status: 0,
-				body: e.toString()
+				body: (e.name ? e.name + ": " : "") + (e.message || e.toString()) + (e.stack ? "\n" + e.stack : "")
 			};
 		}
 	})()`, targetChannelID)
@@ -515,10 +514,8 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 
 	fmt.Printf("\n[Worker #%02d] ================= GQL FOLLOW DIAGNOSTICS ================\n", id)
 	fmt.Printf("   • Transport HTTP Status: %d\n", result.Status)
-	fmt.Printf("   • Full Server Response:  %s\n", result.Body)
+	fmt.Printf("   • Server Response / Error: %s\n", result.Body)
 	fmt.Printf("   ==================================================================\n\n")
-
-	fmt.Printf("[Worker #%02d] 📡 GQL Network Response (HTTP %d): %s\n", id, result.Status, result.Body)
 
 	// Check response content
 	if strings.Contains(result.Body, `"followUser"`) || strings.Contains(result.Body, `"targetID"`) || strings.Contains(result.Body, `"following":true`) {
@@ -535,7 +532,7 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 		return nil
 	}
 
-	return fmt.Errorf("unexpected status %d: %s", result.Status, result.Body)
+	return fmt.Errorf("fetch failed with status %d: %s", result.Status, result.Body)
 }
 
 // performAccountActions manages the lifecycle of an authenticated worker window
@@ -655,7 +652,25 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		} else {
 			// 2. Inject Native Authorized GraphQL Follow Mutation
 			if err := SendNativeFollowMutation(ctx, id, targetChannelID); err != nil {
-				fmt.Printf("[Worker #%02d] ⚠️ Native follow error: %v\n", id, err)
+				fmt.Printf("[Worker #%02d] ⚠️ Native mutation notice (%v). Engaging physical UI button click as fallback...\n", id, err)
+
+				followButtonSelector := `button[data-a-target="follow-button"]`
+				_ = chromedp.Run(ctx,
+					chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
+					chromedp.Sleep(500*time.Millisecond),
+					chromedp.ActionFunc(func(actCtx context.Context) error {
+						return chromedp.Evaluate(fmt.Sprintf(`(() => {
+							const btn = document.querySelector('%s');
+							if (!btn) return false;
+							['pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(evt => {
+								btn.dispatchEvent(new MouseEvent(evt, { view: window, bubbles: true, cancelable: true, buttons: 1 }));
+							});
+							btn.click();
+							return true;
+						})()`, followButtonSelector), nil).Do(actCtx)
+					}),
+					chromedp.Sleep(3*time.Second),
+				)
 			} else {
 				// 3. Update DOM/UI state to reflect following if present
 				_ = chromedp.Run(ctx,
