@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -295,11 +294,31 @@ func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sy
 			current := atomic.LoadInt64(&activeWorkers)
 			fmt.Printf("[Worker #%02d] 💚 Stream loaded in Chrome! Active Windows/Browsers: %d\n", id, current)
 
-			sessionDuration := time.Duration(sessionMinutes)*time.Minute + time.Duration(rand.Intn(30))*time.Second
-			select {
-			case <-ctx.Done():
-			case <-time.After(sessionDuration):
+			// 5. Infinite Keep-Alive & Live Status Check Loop
+			// Instead of closing every 15 minutes, this keeps the browser open indefinitely
+			fmt.Printf("[Worker #%02d] 💚 Stream session locked. Monitoring channel status infinitely...\n", id)
+
+			for {
+				select {
+				case <-ctx.Done():
+					fmt.Printf("[Worker #%02d] Stop signal received. Closing browser instance.\n", id)
+					goto cleanup
+				case <-time.After(60 * time.Second):
+				}
+
+				var offlineMessage string
+				// Evaluates Javascript inside Chrome to check if stream ended or went offline
+				err := chromedp.Run(browserCtx,
+					chromedp.Evaluate(`document.querySelector(".offline-embed, .stream-ended-indicator") ? "offline" : "live"`, &offlineMessage),
+				)
+
+				if err == nil && offlineMessage == "offline" {
+					fmt.Printf("[Worker #%02d] 🔴 Stream has ended or channel went offline. Shutting down browser.\n", id)
+					break
+				}
 			}
+
+		cleanup:
 
 			atomic.AddInt64(&activeWorkers, -1)
 			cancelBrowser()
