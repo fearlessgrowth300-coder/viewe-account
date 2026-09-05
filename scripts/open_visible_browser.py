@@ -5,6 +5,14 @@ import sys
 import random
 import argparse
 
+# Force UTF-8 on Windows console to prevent charmap errors
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # Ensure root workspace directory is in python path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
