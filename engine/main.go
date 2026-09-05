@@ -570,12 +570,29 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		fmt.Printf("[Worker #%02d] ⚠️ Cookie injection notice: %v\n", id, err)
 	}
 
-	// 2. Navigate to the channel with clean load pause (prevents ERR_EMPTY_RESPONSE)
+	// 2. Navigate to the channel with automatic ERR_EMPTY_RESPONSE recovery
 	fmt.Printf("[Worker #%02d] Navigating to stream channel with account session: %s\n", id, targetURL)
 	_ = chromedp.Run(ctx,
 		chromedp.Navigate(targetURL),
-		chromedp.Sleep(8*time.Second),
+		chromedp.Sleep(6*time.Second),
 	)
+
+	// Check if page hit ERR_EMPTY_RESPONSE or net-error and automatically reload
+	var pageError bool
+	_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const title = document.title.toLowerCase();
+		const body = document.body ? document.body.innerText.toLowerCase() : "";
+		return title.includes("isn't working") || body.includes("err_empty_response") || body.includes("didn't send any data");
+	})()`, &pageError))
+
+	if pageError {
+		fmt.Printf("[Worker #%02d] 🔄 Detected ERR_EMPTY_RESPONSE from proxy handshake. Reloading stream page (attempt 2)...\n", id)
+		_ = chromedp.Run(ctx,
+			chromedp.Sleep(2*time.Second),
+			chromedp.Reload(),
+			chromedp.Sleep(8*time.Second),
+		)
+	}
 
 	// Inject LocalStorage tokens so Twitch client recognizes active login state
 	if account.AuthToken != "" {
