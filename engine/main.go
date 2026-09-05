@@ -449,8 +449,16 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 				authToken = localStorage.getItem('auth-token') || "";
 			}
 
+			let integrityToken = "";
+			try {
+				if (window.__twilightSettings && window.__twilightSettings.integrityToken) {
+					integrityToken = window.__twilightSettings.integrityToken;
+				}
+			} catch(e) {}
+
 			const payload = [{
 				"operationName": "FollowButton_FollowUser",
+				"query": "mutation FollowButton_FollowUser($input: FollowUserInput!) { followUser(input: $input) { follow { disableNotifications user { id displayName login } } error { code } } }",
 				"variables": {
 					"input": {
 						"disableNotifications": false,
@@ -460,7 +468,7 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 				"extensions": {
 					"persistedQuery": {
 						"version": 1,
-						"sha256Hash": "38009b1191060938ff5d82998a442d9df6554b7c8df8e98b049d56075c3db731"
+						"sha256Hash": "800e7346bdf7e5278a3c1d3f21b2b56e2639928f86815677a7126b093b2fdd08"
 					}
 				}
 			}];
@@ -470,6 +478,9 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 				"Authorization": "OAuth " + authToken,
 				"Content-Type": "application/json"
 			};
+			if (integrityToken) {
+				headers["Client-Integrity"] = integrityToken;
+			}
 
 			const res = await fetch("https://gql.twitch.tv/gql", {
 				method: "POST",
@@ -556,7 +567,6 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		chromedp.ActionFunc(func(actCtx context.Context) error {
 			for _, c := range account.Cookies {
 				expr := network.SetCookie(c.Name, c.Value).
-					WithURL("https://www.twitch.tv").
 					WithDomain(c.Domain).
 					WithPath(c.Path).
 					WithSecure(c.Secure).
@@ -565,7 +575,17 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 					t := cdp.TimeSinceEpoch(time.Unix(int64(c.Expires), 0))
 					expr = expr.WithExpires(&t)
 				}
-				_ = expr.Do(actCtx)
+				switch strings.ToLower(c.SameSite) {
+				case "none":
+					expr = expr.WithSameSite(network.CookieSameSiteNone)
+				case "lax":
+					expr = expr.WithSameSite(network.CookieSameSiteLax)
+				case "strict":
+					expr = expr.WithSameSite(network.CookieSameSiteStrict)
+				}
+				if err := expr.Do(actCtx); err != nil {
+					_ = network.SetCookie(c.Name, c.Value).WithURL("https://www.twitch.tv").WithPath(c.Path).Do(actCtx)
+				}
 			}
 			return nil
 		}),
@@ -615,18 +635,29 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 	}
 
 	// Check if user menu or login is confirmed
-	var checkLogin string
+	var checkLogin struct {
+		HasUserMenu   bool   `json:"hasUserMenu"`
+		HasLoginBtn   bool   `json:"hasLoginBtn"`
+		UserMenuLabel string `json:"userMenuLabel"`
+	}
 	_ = chromedp.Run(ctx,
 		chromedp.Evaluate(`(() => {
 			const userMenu = document.querySelector('button[data-a-target="user-menu-toggle"]');
-			if (userMenu) return userMenu.getAttribute('aria-label') || "Logged In User Menu";
-			const loginItem = localStorage.getItem('login');
-			return loginItem ? ("@" + loginItem) : "";
+			const loginBtn = document.querySelector('button[data-a-target="login-button"]');
+			return {
+				hasUserMenu: !!userMenu,
+				hasLoginBtn: !!loginBtn,
+				userMenuLabel: userMenu ? (userMenu.getAttribute('aria-label') || "Logged In User Menu") : ""
+			};
 		})()`, &checkLogin),
 	)
 
-	if checkLogin != "" {
-		fmt.Printf("[Worker #%02d] 👤 Confirmed Authenticated Session: %s\n", id, checkLogin)
+	if checkLogin.HasUserMenu {
+		fmt.Printf("[Worker #%02d] 👤 Confirmed Authenticated Session: %s\n", id, checkLogin.UserMenuLabel)
+	} else if checkLogin.HasLoginBtn {
+		fmt.Printf("[Worker #%02d] ⚠️ Twitch indicates guest session (Login button visible).\n", id)
+	} else {
+		fmt.Printf("[Worker #%02d] 👤 Session active (@%s).\n", id, account.Username)
 	}
 
 	// Dismiss consent banners or mature stream dialogs if present
@@ -656,56 +687,113 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		targetChannelID, err := ExtractChannelID(ctx, id, channelLogin)
 		if err != nil {
 			fmt.Printf("[Worker #%02d] ⚠️ Channel ID extraction notice: %v\n", id, err)
-		} else {
-			// 2. Execute Follow Action via Native In-Tab GQL Mutation
-			mutationErr := SendNativeFollowMutation(ctx, id, targetChannelID)
-			if mutationErr != nil {
-				fmt.Printf("[Worker #%02d] ⚠️ Native mutation notice (%v). Engaging UI button click...\n", id, mutationErr)
+		}
 
-				followButtonSelector := `button[data-a-target="follow-button"]`
-				_ = chromedp.Run(ctx,
-					chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
-					chromedp.Sleep(500*time.Millisecond),
-					chromedp.ActionFunc(func(actCtx context.Context) error {
-						return chromedp.Evaluate(fmt.Sprintf(`(() => {
-							const btn = document.querySelector('%s');
-							if (!btn) return false;
-							['pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(evt => {
-								btn.dispatchEvent(new MouseEvent(evt, { view: window, bubbles: true, cancelable: true, buttons: 1 }));
-							});
-							btn.click();
-							return true;
-						})()`, followButtonSelector), nil).Do(actCtx)
-					}),
-				)
+		// 1. Check if already following before attempting any action
+		var initialFollowCheck struct {
+			IsFollowing bool   `json:"isFollowing"`
+			ButtonFound bool   `json:"buttonFound"`
+			ButtonText  string `json:"buttonText"`
+		}
+
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+			const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Following"], button[aria-label="Unfollow"]');
+			if (unfollowBtn) {
+				return {
+					isFollowing: true,
+					buttonFound: true,
+					buttonText: unfollowBtn.innerText.trim() || unfollowBtn.getAttribute('aria-label') || "Following"
+				};
+			}
+			const followBtn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"], button[aria-label^="Follow "]');
+			if (followBtn) {
+				return {
+					isFollowing: false,
+					buttonFound: true,
+					buttonText: followBtn.innerText.trim() || followBtn.getAttribute('aria-label') || "Follow"
+				};
+			}
+			return { isFollowing: false, buttonFound: false, buttonText: "" };
+		})()`, &initialFollowCheck))
+
+		if initialFollowCheck.IsFollowing {
+			fmt.Printf("[Worker #%02d] 💚 Account is ALREADY following @%s (Button: '%s'). No click needed.\n", id, channelLogin, initialFollowCheck.ButtonText)
+		} else {
+			// 2. Perform authoritative follow via genuine CDP hardware click
+			fmt.Printf("[Worker #%02d] 🎯 Engaging Follow button via CDP Native Input events...\n", id)
+			followButtonSelector := `button[data-a-target="follow-button"]`
+
+			clickErr := chromedp.Run(ctx,
+				chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
+				chromedp.Sleep(600*time.Millisecond),
+				chromedp.Click(followButtonSelector, chromedp.ByQuery),
+			)
+
+			if clickErr != nil {
+				fmt.Printf("[Worker #%02d] ⚠️ CDP Click notice: %v. Trying coordinate-targeted click...\n", id, clickErr)
+				var coords struct {
+					X     float64 `json:"x"`
+					Y     float64 `json:"y"`
+					Found bool    `json:"found"`
+				}
+				_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+					const btn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"], button[aria-label^="Follow "]');
+					if (!btn) return { x: 0, y: 0, found: false };
+					const r = btn.getBoundingClientRect();
+					return { x: r.left + r.width / 2, y: r.top + r.height / 2, found: true };
+				})()`, &coords))
+
+				if coords.Found {
+					_ = chromedp.Run(ctx, chromedp.MouseClickXY(coords.X, coords.Y))
+				} else if targetChannelID != "" {
+					fmt.Printf("[Worker #%02d] Button not clickable in DOM. Attempting native GQL mutation fallback...\n", id)
+					_ = SendNativeFollowMutation(ctx, id, targetChannelID)
+				}
 			}
 
-			// 3. Genuine Server-Side Persistence Verification (Wait 6 seconds for Twitch Apollo cache to synchronize)
-			fmt.Printf("[Worker #%02d] ⏳ Verifying genuine server-side follow persistence (waiting 6s)...\n", id)
-			time.Sleep(6 * time.Second)
+			// 3. Genuine Server-Side Persistence Verification (Wait 7s for Apollo cache & Twitch database sync)
+			fmt.Printf("[Worker #%02d] ⏳ Verifying genuine server-side follow persistence (waiting 7s)...\n", id)
+			time.Sleep(7 * time.Second)
 
 			var verifyStatus struct {
-				ButtonText  string `json:"buttonText"`
-				AriaLabel   string `json:"ariaLabel"`
-				IsFollowing bool   `json:"isFollowing"`
+				ButtonText  string   `json:"buttonText"`
+				AriaLabel   string   `json:"ariaLabel"`
+				IsFollowing bool     `json:"isFollowing"`
+				ToastErrors []string `json:"toastErrors"`
 			}
 
-			// Check genuine Twitch Apollo state from window and DOM (no manual attribute manipulation)
+			// Check genuine Twitch Apollo state from window and DOM, plus inspect any Twitch snackbar/toast error messages
 			_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 				const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Following"], button[aria-label="Unfollow"]');
-				const followBtn = document.querySelector('button[data-a-target="follow-button"]');
+				const followBtn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"]');
 				const activeBtn = unfollowBtn || followBtn;
+
+				const toasts = Array.from(document.querySelectorAll('div[data-a-target="tw-core-snackbar"], .tw-toast, [role="alert"]'));
+				const toastTexts = toasts.map(t => t.innerText.trim()).filter(t => t.length > 0);
+
 				return {
 					buttonText: activeBtn ? activeBtn.innerText.trim() : "",
 					ariaLabel: activeBtn ? (activeBtn.getAttribute('aria-label') || "") : "",
-					isFollowing: unfollowBtn !== null || (activeBtn && (activeBtn.innerText.trim().toLowerCase() === "following" || activeBtn.innerText.trim().toLowerCase() === "unfollow"))
+					isFollowing: unfollowBtn !== null || (activeBtn && (activeBtn.innerText.trim().toLowerCase() === "following" || activeBtn.innerText.trim().toLowerCase() === "unfollow")),
+					toastErrors: toastTexts
 				};
 			})()`, &verifyStatus))
+
+			if len(verifyStatus.ToastErrors) > 0 {
+				fmt.Printf("[Worker #%02d] ⚠️ Twitch Server Notice / Toast: %s\n", id, strings.Join(verifyStatus.ToastErrors, " | "))
+			}
 
 			if verifyStatus.IsFollowing {
 				fmt.Printf("[Worker #%02d] 💚 [Verified]: Follow is active and confirmed on Twitch servers! (State: '%s' / '%s')\n", id, verifyStatus.ButtonText, verifyStatus.AriaLabel)
 			} else {
 				fmt.Printf("[Worker #%02d] ⚠️ [Follow Unconfirmed]: Twitch did not persist follow (Button remains: '%s' / '%s').\n", id, verifyStatus.ButtonText, verifyStatus.AriaLabel)
+				// If UI click didn't persist and we have channel ID, attempt direct mutation with full query as safety net
+				if targetChannelID != "" {
+					fmt.Printf("[Worker #%02d] ⚡ Attempting native GQL mutation with full query payload...\n", id)
+					if mutErr := SendNativeFollowMutation(ctx, id, targetChannelID); mutErr == nil {
+						fmt.Printf("[Worker #%02d] 💚 Follow mutation successfully accepted by Twitch backend!\n", id)
+					}
+				}
 			}
 		}
 	}
@@ -793,18 +881,18 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 	}
 	fmt.Printf("[Worker #%02d] 🌐 Launching Chrome (Account: %s | Headless: %v) via: %s\n", id, accLabel, headless, displayName)
 
-	execOpts := append(chromedp.DefaultExecAllocatorOptions[:],
+	execOpts := []chromedp.ExecAllocatorOption{
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
 		chromedp.Flag("headless", headless),
 		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.Flag("allow-running-insecure-content", true),
 		chromedp.Flag("mute-audio", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-infobars", true),
-		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
-	)
+	}
 
 	if !headless {
 		execOpts = append(execOpts, chromedp.Flag("start-maximized", true))
@@ -822,7 +910,7 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
 	defer cancelBrowser()
 
-	// 1. Stealth Evasion & Auth Pre-Seed: Inject script on every new document to wipe out navigator.webdriver and pre-seed localStorage
+	// 1. Stealth & Auth Pre-Seed: Cleanly remove navigator.webdriver without naive prototype tampering
 	_ = chromedp.Run(browserCtx,
 		chromedp.ActionFunc(func(actCtx context.Context) error {
 			tokenVal := ""
@@ -833,9 +921,6 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 			}
 			stealthJS := fmt.Sprintf(`
 				Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-				window.chrome = { runtime: {} };
-				Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-				Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
 				try {
 					if ('%s' !== '') {
 						localStorage.setItem('auth-token', '%s');
@@ -849,11 +934,58 @@ func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy Proxy
 		}),
 	)
 
-	// 2. Live Network Diagnostics: Listen to Twitch GQL responses
+	// 2. Live Network Diagnostics: Track genuine Follow mutation requests & responses
+	var followReqLock sync.Mutex
+	var followMutationReqID network.RequestID
+
 	chromedp.ListenTarget(browserCtx, func(ev interface{}) {
-		if res, ok := ev.(*network.EventResponseReceived); ok {
-			if strings.Contains(res.Response.URL, "gql.twitch.tv") {
-				fmt.Printf("[Worker #%02d Network] 📡 Twitch GQL Response: HTTP %d (%s)\n", id, int(res.Response.Status), res.Response.StatusText)
+		switch e := ev.(type) {
+		case *network.EventRequestWillBeSent:
+			if strings.Contains(e.Request.URL, "gql.twitch.tv") && e.Request.HasPostData {
+				var postText strings.Builder
+				for _, entry := range e.Request.PostDataEntries {
+					if decoded, err := base64.StdEncoding.DecodeString(entry.Bytes); err == nil && len(decoded) > 0 {
+						postText.Write(decoded)
+					} else {
+						postText.WriteString(entry.Bytes)
+					}
+				}
+				pStr := postText.String()
+				if strings.Contains(pStr, "FollowButton_FollowUser") || strings.Contains(pStr, "followUser") {
+					followReqLock.Lock()
+					followMutationReqID = e.RequestID
+					followReqLock.Unlock()
+					preview := pStr
+					if len(preview) > 300 {
+						preview = preview[:300] + "..."
+					}
+					fmt.Printf("[Worker #%02d Network] 📤 Twitch Follow Mutation Dispatched: %s\n", id, preview)
+				}
+			}
+		case *network.EventResponseReceived:
+			if strings.Contains(e.Response.URL, "gql.twitch.tv") {
+				followReqLock.Lock()
+				isFollowMutation := (e.RequestID == followMutationReqID && followMutationReqID != "")
+				followReqLock.Unlock()
+
+				if isFollowMutation {
+					reqID := e.RequestID
+					status := int(e.Response.Status)
+					statusText := e.Response.StatusText
+					go func(rID network.RequestID, s int, st string) {
+						var body []byte
+						err := chromedp.Run(browserCtx, chromedp.ActionFunc(func(c context.Context) error {
+							var err error
+							body, err = network.GetResponseBody(rID).Do(c)
+							return err
+						}))
+						if err == nil && len(body) > 0 {
+							fmt.Printf("[Worker #%02d Network] 📥 Twitch Follow Mutation Server Response (HTTP %d %s): %s\n", id, s, st, string(body))
+						} else {
+							fmt.Printf("[Worker #%02d Network] 📥 Twitch Follow Mutation Response: HTTP %d %s\n", id, s, st)
+						}
+					}(reqID, status, statusText)
+				}
 			}
 		}
 	})
