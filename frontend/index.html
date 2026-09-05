@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Viewbotter Automation Engine | Enterprise Darkboard</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#EEF2FF',
+              500: '#6366F1',
+              600: '#4F46E5',
+              700: '#4338CA',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18 & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <!-- Babel for inline JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+    }
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0B0E14;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1E2638;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #2B354C;
+    }
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 0.8; filter: drop-shadow(0 0 15px rgba(99, 102, 241, 0.4)); }
+      50% { opacity: 1; filter: drop-shadow(0 0 25px rgba(99, 102, 241, 0.8)); }
+    }
+    .glow-effect {
+      animation: pulseGlow 4s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="bg-[#0B0E14] text-slate-200 antialiased overflow-hidden select-none">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // Helper to render Lucide SVG Icon dynamically
+    const Icon = ({ name, size = 18, className = "" }) => {
+      const iconRef = useRef(null);
+      useEffect(() => {
+        if (iconRef.current && window.lucide) {
+          iconRef.current.innerHTML = `<i data-lucide="${name}" style="width: ${size}px; height: ${size}px;"></i>`;
+          window.lucide.createIcons({
+            root: iconRef.current
+          });
+        }
+      }, [name, size, className]);
+
+      return <span ref={iconRef} className={`inline-flex items-center justify-center shrink-0 ${className}`} />;
+    };
+
+    function App() {
+      const [activeTab, setActiveTab] = useState('Dashboard');
+      const [activeModal, setActiveModal] = useState(null);
+
+      // Customizable Configuration
+      const [viewerCount, setViewerCount] = useState(1);
+      const [activeChatters, setActiveChatters] = useState(1);
+      const [disableViewerlist, setDisableViewerlist] = useState(false);
+      const [autoFollow, setAutoFollow] = useState(true);
+      const [autoUnlockChat, setAutoUnlockChat] = useState(true);
+      const [useAIChat, setUseAIChat] = useState(true);
+      const [selectedPlatform, setSelectedPlatform] = useState('twitch');
+      const [channelName, setChannelName] = useState('cloverreggie');
+      const [isStarting, setIsStarting] = useState(false);
+      const [wsConnected, setWsConnected] = useState(false);
+
+      // Live Telemetry Stats
+      const [stats, setStats] = useState({
+        active_viewers: 1,
+        total_chatters: 1,
+        plans_running: 1,
+        proxy_bandwidth_mb: 48.6,
+        chat_messages_per_min: 18,
+        system_telemetry: { cpu_percent: 12.4, ram_percent: 21.0 }
+      });
+
+      // Live Real-Time Chat Stream
+      const [chatMessages, setChatMessages] = useState([
+        { id: 1, user: 'olaisaboy4', bot: true, isAI: true, text: 'stream looking super clean today 🔥', time: '06:12' },
+        { id: 2, user: 'fearless_fan', bot: false, text: 'what games are we playing next?', time: '06:13' },
+        { id: 3, user: 'boy_mular3', bot: true, isAI: true, text: 'actual hype moment haha', time: '06:14' },
+        { id: 4, user: 'cloverreggie_mod', bot: false, text: 'welcome in everyone!', time: '06:15' },
+      ]);
+
+      const wsRef = useRef(null);
+
+      // Auto-connect to backend websocket if running, fallback graceful
+      useEffect(() => {
+        try {
+          const ws = new WebSocket('ws://127.0.0.1:8000/ws/live');
+          wsRef.current = ws;
+
+          ws.onopen = () => setWsConnected(true);
+          ws.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === 'chat_message') {
+                setChatMessages((prev) => [...prev.slice(-30), data.payload]);
+              } else if (data.type === 'telemetry_update') {
+                setStats(data.payload);
+              }
+            } catch (e) {}
+          };
+          ws.onclose = () => setWsConnected(false);
+        } catch (e) {}
+
+        return () => wsRef.current?.close();
+      }, []);
+
+      const handleStartTask = async () => {
+        setIsStarting(true);
+        try {
+          const payload = {
+            channel_name: channelName,
+            platform: selectedPlatform === 'twitch' ? 'Twitch' : 'Kick',
+            viewer_count: Number(viewerCount),
+            use_chat: true,
+            use_ai_llm_chat: useAIChat,
+            auto_follow: autoFollow,
+            auto_unlock_chat: autoUnlockChat,
+            proxy_tier: 'Residential'
+          };
+
+          const res = await fetch('http://127.0.0.1:8000/api/tasks/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          alert(`Swarm Initialized: ${data.message || 'Worker running'}`);
+        } catch (e) {
+          alert(`Ready to launch! You can also execute via CLI: .\\twitch-engine.exe -channel ${channelName} -workers ${viewerCount}`);
+        } finally {
+          setIsStarting(false);
+          setActiveModal(null);
+        }
+      };
+
+      const navItems = [
+        { name: 'Dashboard', icon: 'layout-dashboard' },
+        { name: 'My Channels', icon: 'tv' },
+        { name: 'Plans & Workers', icon: 'layers' },
+        { name: 'Chat Lists', icon: 'message-square' },
+        { name: 'Telemetry & Stats', icon: 'bar-chart-3' },
+        { name: 'Proxy Pool', icon: 'globe' },
+        { name: 'Accounts Hub', icon: 'user-check' },
+        { name: 'Settings', icon: 'settings' },
+      ];
+
+      return (
+        <div className="flex h-screen w-full bg-[#0B0E14] text-slate-200 overflow-hidden">
+          
+          {/* ================= SIDEBAR ================= */}
+          <aside className="w-64 flex flex-col justify-between border-r border-[#1E2638] bg-[#0E131F]/90 p-4 shrink-0">
+            <div className="space-y-6">
+              {/* Logo */}
+              <div className="flex items-center gap-3 px-2 py-1">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-[#6366F1] via-[#8B5CF6] to-[#EC4899] flex items-center justify-center shadow-lg shadow-[#6366F1]/30">
+                  <Icon name="sparkles" size={20} className="text-white" />
+                </div>
+                <div>
+                  <span className="text-lg font-black tracking-wider text-white uppercase block leading-none">VIEWBOTTER</span>
+                  <span className="text-[10px] text-[#6366F1] font-bold tracking-widest uppercase mt-0.5 block">ENTERPRISE v2.0</span>
+                </div>
+              </div>
+
+              {/* Navigation Items */}
+              <nav className="space-y-1">
+                {navItems.map((item) => {
+                  const isActive = activeTab === item.name;
+                  return (
+                    <button
+                      key={item.name}
+                      onClick={() => setActiveTab(item.name)}
+                      className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 cursor-pointer ${
+                        isActive
+                          ? 'bg-[#161B26] text-white border-l-4 border-[#6366F1] shadow-md shadow-[#6366F1]/10 font-semibold'
+                          : 'text-slate-400 hover:text-slate-200 hover:bg-[#161B26]/50'
+                      }`}
+                    >
+                      <Icon name={item.icon} size={18} className={isActive ? 'text-[#6366F1]' : 'text-slate-400'} />
+                      {item.name}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+
+            {/* Bottom Status Card */}
+            <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-300">Engine Core</span>
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  Ready
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>Direct GQL Follow:</span>
+                <span className="text-emerald-400 font-bold">Enabled</span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>SOAX Proxy Pool:</span>
+                <span className="text-purple-400 font-bold">6 Active</span>
+              </div>
+            </div>
+          </aside>
+
+          {/* ================= MAIN CONTENT ================= */}
+          <div className="flex-1 flex flex-col h-screen overflow-y-auto">
+            
+            {/* Header Bar */}
+            <header className="h-16 border-b border-[#1E2638] bg-[#0E131F]/40 backdrop-blur-md px-8 flex items-center justify-between sticky top-0 z-30">
+              <div className="flex items-center gap-4 flex-1 max-w-md">
+                <div className="relative w-full">
+                  <Icon name="search" size={16} className="text-slate-500 absolute left-3.5 top-3" />
+                  <input
+                    type="text"
+                    placeholder="Search channels, accounts, proxies, logs..."
+                    className="w-full bg-[#161B26] border border-[#1E2638] rounded-xl pl-10 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-[#6366F1]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-[#161B26] border border-[#1E2638] rounded-xl text-xs text-slate-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span>127.0.0.1:8000</span>
+                </div>
+                <button className="p-2 rounded-xl bg-[#161B26] border border-[#1E2638] text-slate-400 hover:text-white cursor-pointer">
+                  <Icon name="bell" size={16} />
+                </button>
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#6366F1] to-[#9333EA] text-white flex items-center justify-center text-xs font-black shadow-md cursor-pointer">
+                  UP
+                </div>
+              </div>
+            </header>
+
+            {/* Dashboard Body */}
+            <main className="p-8 space-y-8 flex-1 max-w-7xl w-full mx-auto">
+              
+              {/* Header Title & Quick Actions */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
+                    Automation Engine Dashboard
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                      v2.0 Native GQL
+                    </span>
+                  </h1>
+                  <p className="text-xs text-slate-400 mt-1">Multi-instance browser concurrency, residential proxy lock-in, stealth fingerprints & AI chat</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button 
+                    onClick={() => setActiveModal('manage-plan')}
+                    className="px-4 py-2 rounded-xl bg-[#161B26] hover:bg-[#1E2638] text-slate-200 border border-[#1E2638] text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all"
+                  >
+                    <Icon name="sliders" size={16} className="text-slate-400" /> Worker Settings
+                  </button>
+                  <button 
+                    onClick={() => setActiveModal('add-channel')}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#6366F1] to-[#8B5CF6] hover:from-[#4F46E5] hover:to-[#7C3AED] text-white text-xs font-bold shadow-lg shadow-[#6366F1]/25 flex items-center gap-2 cursor-pointer transition-all"
+                  >
+                    <Icon name="play" size={16} /> Launch Worker Swarm
+                  </button>
+                </div>
+              </div>
+
+              {/* Metric Stats Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                
+                <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-5 flex items-center justify-between shadow-sm relative overflow-hidden">
+                  <div className="absolute top-0 left-0 h-full w-1.5 bg-[#10B981]" />
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">ACTIVE WORKERS</p>
+                    <p className="text-3xl font-black text-white mt-1.5">{viewerCount}</p>
+                    <p className="text-[10px] text-emerald-400 mt-1 font-semibold">100% Window Persistence</p>
+                  </div>
+                  <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                    <Icon name="eye" size={24} />
+                  </div>
+                </div>
+
+                <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-5 flex items-center justify-between shadow-sm relative overflow-hidden">
+                  <div className="absolute top-0 left-0 h-full w-1.5 bg-[#8B5CF6]" />
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">AI CHATTERS</p>
+                    <p className="text-3xl font-black text-white mt-1.5">{activeChatters}</p>
+                    <p className="text-[10px] text-purple-400 mt-1 font-semibold">Dynamic Human Jitter</p>
+                  </div>
+                  <div className="w-12 h-12 rounded-xl bg-purple-500/10 border border-purple-500/20 text-purple-400 flex items-center justify-center">
+                    <Icon name="bot" size={24} />
+                  </div>
+                </div>
+
+                <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-5 flex items-center justify-between shadow-sm relative overflow-hidden">
+                  <div className="absolute top-0 left-0 h-full w-1.5 bg-[#3B82F6]" />
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">PROXY BANDWIDTH</p>
+                    <p className="text-3xl font-black text-white mt-1.5">{stats.proxy_bandwidth_mb} MB</p>
+                    <p className="text-[10px] text-blue-400 mt-1 font-semibold">Strict IP Lock-in Active</p>
+                  </div>
+                  <div className="w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center">
+                    <Icon name="wifi" size={24} />
+                  </div>
+                </div>
+
+                <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-5 flex items-center justify-between shadow-sm relative overflow-hidden">
+                  <div className="absolute top-0 left-0 h-full w-1.5 bg-[#EC4899]" />
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">FOLLOW DISPATCH</p>
+                    <p className="text-3xl font-black text-white mt-1.5">GQL 2.0</p>
+                    <p className="text-[10px] text-pink-400 mt-1 font-semibold">Button Bypass Verified</p>
+                  </div>
+                  <div className="w-12 h-12 rounded-xl bg-pink-500/10 border border-pink-500/20 text-pink-400 flex items-center justify-center">
+                    <Icon name="zap" size={24} />
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Stream Intelligence & Stealth Controls */}
+              <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-6 space-y-6">
+                <div className="flex items-center justify-between border-b border-[#1E2638] pb-4">
+                  <div>
+                    <h2 className="text-base font-bold text-white flex items-center gap-2">
+                      <Icon name="sparkles" size={18} className="text-[#6366F1]" /> Automation Modes & Bypass Handshake
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">Toggle live chat generation, native follow mutation, and rules dismissal</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  
+                  <div className="p-4 rounded-xl bg-[#0D111A] border border-[#1E2638] flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <Icon name="bot" size={16} className="text-purple-400" /> AI Context Chatter
+                      </p>
+                      <p className="text-[10px] text-slate-500">Natural stream chat with randomized intervals</p>
+                    </div>
+                    <button
+                      onClick={() => setUseAIChat(!useAIChat)}
+                      className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer ${useAIChat ? 'bg-[#6366F1]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`w-5 h-5 rounded-full bg-white transition-transform ${useAIChat ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-[#0D111A] border border-[#1E2638] flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <Icon name="user-check" size={16} className="text-emerald-400" /> Native GQL Auto-Follow
+                      </p>
+                      <p className="text-[10px] text-slate-500">Injects directly into authenticated session</p>
+                    </div>
+                    <button
+                      onClick={() => setAutoFollow(!autoFollow)}
+                      className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer ${autoFollow ? 'bg-[#6366F1]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`w-5 h-5 rounded-full bg-white transition-transform ${autoFollow ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-[#0D111A] border border-[#1E2638] flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <Icon name="shield-alert" size={16} className="text-cyan-400" /> Auto-Dismiss Overlays
+                      </p>
+                      <p className="text-[10px] text-slate-500">Bypasses mature warning & consent popups</p>
+                    </div>
+                    <button
+                      onClick={() => setAutoUnlockChat(!autoUnlockChat)}
+                      className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer ${autoUnlockChat ? 'bg-[#6366F1]' : 'bg-slate-700'}`}
+                    >
+                      <div className={`w-5 h-5 rounded-full bg-white transition-transform ${autoUnlockChat ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+
+                </div>
+              </div>
+
+              {/* Active Target Channel Showcase Card */}
+              <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-bold text-white flex items-center gap-2">
+                    <Icon name="tv" size={18} className="text-[#9146FF]" /> Active Stream Target
+                  </h2>
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Live Monitored
+                  </span>
+                </div>
+
+                <div className="bg-[#0D111A] border border-[#1E2638] rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                  <div className="flex items-center gap-4">
+                    <div className="w-14 h-14 rounded-2xl bg-[#9146FF]/15 border border-[#9146FF]/30 flex items-center justify-center text-[#9146FF] shadow-lg shadow-[#9146FF]/10">
+                      <Icon name="tv" size={28} />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-3">
+                        <h3 className="text-lg font-black text-white">{channelName}</h3>
+                        <span className="px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-400 text-[10px] font-bold border border-purple-500/20">
+                          Twitch Partner / Affiliate
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-1 font-mono">https://www.twitch.tv/{channelName}</p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-8 text-left">
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-500 uppercase">ACTIVE WORKERS</p>
+                      <p className="text-sm font-black text-white mt-1">{viewerCount} Window</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-500 uppercase">AUTH ACCOUNT</p>
+                      <p className="text-sm font-bold text-emerald-400 mt-1">@olaisaboy4</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-500 uppercase">RESIDENTIAL PROXY</p>
+                      <p className="text-sm font-bold text-purple-400 mt-1">SOAX US (Locked)</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setActiveModal('manage-plan')}
+                      className="px-4 py-2 rounded-xl bg-[#161B26] hover:bg-[#1E2638] text-slate-200 border border-[#1E2638] text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all"
+                    >
+                      <Icon name="settings" size={14} className="text-slate-400" /> Configure
+                    </button>
+                    <button
+                      onClick={() => setActiveModal('live-chat')}
+                      className="px-4 py-2 rounded-xl bg-[#6366F1]/15 hover:bg-[#6366F1]/25 text-[#6366F1] border border-[#6366F1]/30 text-xs font-bold flex items-center gap-2 cursor-pointer transition-all shadow-md"
+                    >
+                      <Icon name="message-square" size={14} /> Live Chat Feed
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Accounts & Proxy Pool Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                {/* Authenticated Accounts List */}
+                <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-6 space-y-4">
+                  <div className="flex items-center justify-between border-b border-[#1E2638] pb-3">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Icon name="user-check" size={16} className="text-[#6366F1]" /> Loaded Accounts (OAuth Ready)
+                    </h3>
+                    <span className="text-xs text-slate-500 font-mono">2 accounts</span>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    <div className="p-3.5 rounded-xl bg-[#0D111A] border border-[#1E2638] flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs font-bold">
+                          OB
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-white">@olaisaboy4</p>
+                          <p className="text-[10px] text-emerald-400">OAuth & Session Cookies Active</p>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 text-[10px] font-bold border border-emerald-500/20">
+                        IP Locked (Port 51485)
+                      </span>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-[#0D111A] border border-[#1E2638] flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 flex items-center justify-center text-xs font-bold">
+                          BM
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-white">@boy_mular3</p>
+                          <p className="text-[10px] text-purple-400">OAuth & Session Cookies Active</p>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-400 text-[10px] font-bold border border-purple-500/20">
+                        IP Locked (Port 51486)
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Residential Proxy Bridges */}
+                <div className="bg-[#161B26] border border-[#1E2638] rounded-2xl p-6 space-y-4">
+                  <div className="flex items-center justify-between border-b border-[#1E2638] pb-3">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Icon name="globe" size={16} className="text-emerald-400" /> SOAX Residential Proxy Bridge
+                    </h3>
+                    <span className="text-xs text-emerald-400 font-mono">6 Connected</span>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    <div className="p-3 rounded-xl bg-[#0D111A] border border-[#1E2638] flex items-center justify-between text-xs">
+                      <div>
+                        <p className="font-bold text-white">💎 Zia_Faceless_Mom</p>
+                        <p className="text-[10px] text-slate-500 font-mono">http://127.0.0.1:17361</p>
+                      </div>
+                      <span className="text-emerald-400 font-bold text-[11px]">Active</span>
+                    </div>
+                    <div className="p-3 rounded-xl bg-[#0D111A] border border-[#1E2638] flex items-center justify-between text-xs">
+                      <div>
+                        <p className="font-bold text-white">💎 Ruby_Digital_Mom</p>
+                        <p className="text-[10px] text-slate-500 font-mono">http://127.0.0.1:17362</p>
+                      </div>
+                      <span className="text-emerald-400 font-bold text-[11px]">Active</span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+            </main>
+          </div>
+
+          {/* ================= MODAL: LAUNCH SWARM ================= */}
+          {activeModal === 'add-channel' && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+              <div className="w-full max-w-md bg-[#161B26] border border-[#1E2638] rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-[#1E2638]">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Icon name="play" size={16} className="text-[#6366F1]" /> Launch Custom Worker Swarm
+                  </h3>
+                  <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white p-1 cursor-pointer">
+                    <Icon name="x" size={16} />
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-4">
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">Target Channel Username</label>
+                    <input
+                      type="text"
+                      value={channelName}
+                      onChange={(e) => setChannelName(e.target.value)}
+                      placeholder="cloverreggie"
+                      className="w-full bg-[#0D111A] border border-[#1E2638] rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-[#6366F1]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">Concurrent Windows (Workers)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={viewerCount}
+                      onChange={(e) => setViewerCount(Number(e.target.value))}
+                      className="w-full bg-[#0D111A] border border-[#1E2638] rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-[#6366F1]"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">Runs visible on screen with automatic IP lock-in</p>
+                  </div>
+
+                  <button 
+                    onClick={handleStartTask}
+                    disabled={isStarting}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-[#6366F1] to-[#8B5CF6] hover:from-[#4F46E5] hover:to-[#7C3AED] text-white text-xs font-bold shadow-lg shadow-[#6366F1]/25 mt-2 cursor-pointer transition-all"
+                  >
+                    {isStarting ? 'Starting Chrome Instances...' : '🚀 Launch Engine Swarm'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= MODAL: WORKER SETTINGS ================= */}
+          {activeModal === 'manage-plan' && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+              <div className="w-full max-w-md bg-[#161B26] border border-[#1E2638] rounded-2xl shadow-2xl overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-[#1E2638]">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Icon name="sliders" size={16} className="text-[#6366F1]" /> Worker Engine Preferences
+                  </h3>
+                  <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white p-1 cursor-pointer">
+                    <Icon name="x" size={16} />
+                  </button>
+                </div>
+                <div className="p-6 space-y-4 text-xs">
+                  <div className="flex items-center justify-between p-3 rounded-xl bg-[#0D111A] border border-[#1E2638]">
+                    <span className="font-semibold text-slate-300">Headless (Background) Mode</span>
+                    <span className="text-purple-400 font-bold">False (Always Visible)</span>
+                  </div>
+                  <div className="flex items-center justify-between p-3 rounded-xl bg-[#0D111A] border border-[#1E2638]">
+                    <span className="font-semibold text-slate-300">Window Persistence</span>
+                    <span className="text-emerald-400 font-bold">Infinite (Until Ctrl+C)</span>
+                  </div>
+                  <div className="flex items-center justify-between p-3 rounded-xl bg-[#0D111A] border border-[#1E2638]">
+                    <span className="font-semibold text-slate-300">GQL Follow Verification</span>
+                    <span className="text-emerald-400 font-bold">Direct Payload Active</span>
+                  </div>
+                  <button 
+                    onClick={() => setActiveModal(null)}
+                    className="w-full py-2.5 rounded-xl bg-[#161B26] hover:bg-[#1E2638] border border-[#1E2638] text-white font-bold cursor-pointer"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= MODAL: LIVE CHAT STREAM ================= */}
+          {activeModal === 'live-chat' && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+              <div className="w-full max-w-lg bg-[#161B26] border border-[#1E2638] rounded-2xl shadow-2xl overflow-hidden flex flex-col h-[520px]">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-[#1E2638]">
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Icon name="message-square" size={16} className="text-[#6366F1]" /> Live Stream Chat Feed
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-bold">● Active Room</span>
+                  </div>
+                  <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white p-1 cursor-pointer">
+                    <Icon name="x" size={16} />
+                  </button>
+                </div>
+
+                <div className="flex-1 p-4 overflow-y-auto space-y-2.5 bg-[#0D111A] font-mono text-xs">
+                  {chatMessages.map((msg, idx) => (
+                    <div key={idx} className="flex items-start gap-2 p-2 rounded hover:bg-[#161B26]/60 border border-transparent hover:border-[#1E2638]">
+                      <span className="text-[10px] text-slate-500">{msg.time}</span>
+                      {msg.isAI && <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 text-[9px] font-extrabold border border-purple-500/30">AI-BOT</span>}
+                      <span className="font-bold text-purple-400">{msg.user}:</span>
+                      <span className="text-slate-200">{msg.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
