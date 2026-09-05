@@ -437,6 +437,95 @@ func ExtractChannelID(ctx context.Context, id int, channelLogin string) (string,
 }
 
 // SendNativeFollowMutation runs the authorized follow mutation directly inside Chrome's authenticated network session
+// CheckFollowStatus queries Twitch GraphQL user self connection to verify genuine server-side follow status
+func CheckFollowStatus(ctx context.Context, id int, channelLogin string) (bool, error) {
+	checkScript := fmt.Sprintf(`(async () => {
+		try {
+			const clientId = (window.__twilightSettings && window.__twilightSettings.clientId) ? window.__twilightSettings.clientId : "kimne78kx3ncx6brgo4mv6wki5h1ko";
+			const authMatch = document.cookie.match(/auth-token=([^;]+)/);
+			let authToken = authMatch ? authMatch[1] : "";
+			if (!authToken) {
+				authToken = localStorage.getItem('auth-token') || "";
+			}
+			const res = await fetch("https://gql.twitch.tv/gql", {
+				method: "POST",
+				headers: {
+					"Client-Id": clientId,
+					"Authorization": "OAuth " + authToken,
+					"Content-Type": "application/json"
+				},
+				body: JSON.stringify([{
+					"query": "query FollowCheck($login: String!) { user(login: $login) { id login self { follower { followedAt } } } }",
+					"variables": { "login": "%s" }
+				}])
+			});
+			const text = await res.text();
+			return JSON.stringify({ status: res.status, body: text });
+		} catch (e) {
+			return JSON.stringify({ status: 0, body: e.message || e.toString() });
+		}
+	})()`, channelLogin)
+
+	var result struct {
+		Status int    `json:"status"`
+		Body   string `json:"body"`
+	}
+
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(actCtx context.Context) error {
+		res, exp, err := runtime.Evaluate(checkScript).WithAwaitPromise(true).WithReturnByValue(true).Do(actCtx)
+		if err != nil {
+			return err
+		}
+		if exp != nil {
+			return fmt.Errorf("js exception: %s", exp.Text)
+		}
+		if res != nil && len(res.Value) > 0 {
+			var rawJSON string
+			if err := json.Unmarshal(res.Value, &rawJSON); err == nil {
+				_ = json.Unmarshal([]byte(rawJSON), &result)
+			} else {
+				_ = json.Unmarshal(res.Value, &result)
+			}
+		}
+		return nil
+	}))
+
+	if err != nil {
+		return false, err
+	}
+
+	// Parse JSON response
+	type GqlFollowCheckItem struct {
+		Data struct {
+			User *struct {
+				ID    string `json:"id"`
+				Login string `json:"login"`
+				Self  *struct {
+					Follower *struct {
+						FollowedAt string `json:"followedAt"`
+					} `json:"follower"`
+				} `json:"self"`
+			} `json:"user"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	var parsed []GqlFollowCheckItem
+	if err := json.Unmarshal([]byte(result.Body), &parsed); err == nil && len(parsed) > 0 {
+		if len(parsed[0].Errors) > 0 {
+			return false, fmt.Errorf("twitch gql error: %s", parsed[0].Errors[0].Message)
+		}
+		if parsed[0].Data.User != nil && parsed[0].Data.User.Self != nil && parsed[0].Data.User.Self.Follower != nil {
+			return true, nil
+		}
+		return false, nil
+	}
+
+	return false, fmt.Errorf("unexpected check response: %s", result.Body)
+}
+
 func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID string) error {
 	fmt.Printf("[Worker #%02d] ⚡ Sending native GQL follow mutation inside browser session...\n", id)
 
@@ -535,22 +624,49 @@ func SendNativeFollowMutation(ctx context.Context, id int, targetChannelID strin
 	fmt.Printf("   • Server Response / Error: %s\n", result.Body)
 	fmt.Printf("   ==================================================================\n\n")
 
-	// Parse server response strictly
-	if strings.Contains(result.Body, `"errors"`) {
-		return fmt.Errorf("Twitch server rejected follow: %s", result.Body)
+	// Strict JSON parsing of Twitch Apollo GraphQL response
+	type FollowResponseItem struct {
+		Data struct {
+			FollowUser *struct {
+				Follow *struct {
+					DisableNotifications bool `json:"disableNotifications"`
+					User                 struct {
+						ID          string `json:"id"`
+						DisplayName string `json:"displayName"`
+						Login       string `json:"login"`
+					} `json:"user"`
+				} `json:"follow"`
+				Error *struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			} `json:"followUser"`
+		} `json:"data"`
+		Errors []struct {
+			Message    string `json:"message"`
+			Extensions *struct {
+				Code string `json:"code"`
+			} `json:"extensions"`
+		} `json:"errors"`
 	}
 
-	if strings.Contains(result.Body, `"followUser"`) || strings.Contains(result.Body, `"following":true`) {
-		fmt.Printf("[Worker #%02d] 💚 [Success] Follow mutation confirmed by Twitch database!\n", id)
-		return nil
+	var items []FollowResponseItem
+	if err := json.Unmarshal([]byte(result.Body), &items); err == nil && len(items) > 0 {
+		item := items[0]
+		if len(item.Errors) > 0 {
+			return fmt.Errorf("twitch GraphQL rejected mutation: %s", item.Errors[0].Message)
+		}
+		if item.Data.FollowUser != nil {
+			if item.Data.FollowUser.Error != nil && item.Data.FollowUser.Error.Code != "" {
+				return fmt.Errorf("twitch followUser error: %s", item.Data.FollowUser.Error.Code)
+			}
+			if item.Data.FollowUser.Follow != nil {
+				fmt.Printf("[Worker #%02d] 💚 [Success] Follow mutation confirmed by Twitch database (target: @%s)!\n", id, item.Data.FollowUser.Follow.User.Login)
+				return nil
+			}
+		}
 	}
 
-	if result.Status == 200 {
-		fmt.Printf("[Worker #%02d] 💚 [Success] Follow request acknowledged (HTTP 200).\n", id)
-		return nil
-	}
-
-	return fmt.Errorf("mutation failed with status %d: %s", result.Status, result.Body)
+	return fmt.Errorf("mutation rejected or unexpected response (HTTP %d): %s", result.Status, result.Body)
 }
 
 // performAccountActions manages the lifecycle of an authenticated worker window
@@ -689,109 +805,133 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 			fmt.Printf("[Worker #%02d] ⚠️ Channel ID extraction notice: %v\n", id, err)
 		}
 
-		// 1. Check if already following before attempting any action
-		var initialFollowCheck struct {
-			IsFollowing bool   `json:"isFollowing"`
-			ButtonFound bool   `json:"buttonFound"`
-			ButtonText  string `json:"buttonText"`
-		}
-
-		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-			const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Following"], button[aria-label="Unfollow"]');
-			if (unfollowBtn) {
-				return {
-					isFollowing: true,
-					buttonFound: true,
-					buttonText: unfollowBtn.innerText.trim() || unfollowBtn.getAttribute('aria-label') || "Following"
-				};
-			}
-			const followBtn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"], button[aria-label^="Follow "]');
-			if (followBtn) {
-				return {
-					isFollowing: false,
-					buttonFound: true,
-					buttonText: followBtn.innerText.trim() || followBtn.getAttribute('aria-label') || "Follow"
-				};
-			}
-			return { isFollowing: false, buttonFound: false, buttonText: "" };
-		})()`, &initialFollowCheck))
-
-		if initialFollowCheck.IsFollowing {
-			fmt.Printf("[Worker #%02d] 💚 Account is ALREADY following @%s (Button: '%s'). No click needed.\n", id, channelLogin, initialFollowCheck.ButtonText)
+		// 1. Independent Server-Side Check: Verify if account is already confirmed following on Twitch database
+		serverFollowing, checkErr := CheckFollowStatus(ctx, id, channelLogin)
+		if checkErr == nil && serverFollowing {
+			fmt.Printf("[Worker #%02d] 💚 [Database Verified] Account is ALREADY following @%s on Twitch servers! Skipping follow action.\n", id, channelLogin)
 		} else {
-			// 2. Perform authoritative follow via genuine CDP hardware click
-			fmt.Printf("[Worker #%02d] 🎯 Engaging Follow button via CDP Native Input events...\n", id)
-			followButtonSelector := `button[data-a-target="follow-button"]`
-
-			clickErr := chromedp.Run(ctx,
-				chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
-				chromedp.Sleep(600*time.Millisecond),
-				chromedp.Click(followButtonSelector, chromedp.ByQuery),
-			)
-
-			if clickErr != nil {
-				fmt.Printf("[Worker #%02d] ⚠️ CDP Click notice: %v. Trying coordinate-targeted click...\n", id, clickErr)
-				var coords struct {
-					X     float64 `json:"x"`
-					Y     float64 `json:"y"`
-					Found bool    `json:"found"`
-				}
-				_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-					const btn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"], button[aria-label^="Follow "]');
-					if (!btn) return { x: 0, y: 0, found: false };
-					const r = btn.getBoundingClientRect();
-					return { x: r.left + r.width / 2, y: r.top + r.height / 2, found: true };
-				})()`, &coords))
-
-				if coords.Found {
-					_ = chromedp.Run(ctx, chromedp.MouseClickXY(coords.X, coords.Y))
-				} else if targetChannelID != "" {
-					fmt.Printf("[Worker #%02d] Button not clickable in DOM. Attempting native GQL mutation fallback...\n", id)
-					_ = SendNativeFollowMutation(ctx, id, targetChannelID)
-				}
+			if checkErr != nil {
+				fmt.Printf("[Worker #%02d] ℹ️ Initial server follow check notice: %v. Checking DOM button...\n", id, checkErr)
+			}
+			// Fallback check DOM button
+			var initialFollowCheck struct {
+				IsFollowing bool   `json:"isFollowing"`
+				ButtonFound bool   `json:"buttonFound"`
+				ButtonText  string `json:"buttonText"`
 			}
 
-			// 3. Genuine Server-Side Persistence Verification (Wait 7s for Apollo cache & Twitch database sync)
-			fmt.Printf("[Worker #%02d] ⏳ Verifying genuine server-side follow persistence (waiting 7s)...\n", id)
-			time.Sleep(7 * time.Second)
-
-			var verifyStatus struct {
-				ButtonText  string   `json:"buttonText"`
-				AriaLabel   string   `json:"ariaLabel"`
-				IsFollowing bool     `json:"isFollowing"`
-				ToastErrors []string `json:"toastErrors"`
-			}
-
-			// Check genuine Twitch Apollo state from window and DOM, plus inspect any Twitch snackbar/toast error messages
 			_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 				const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Following"], button[aria-label="Unfollow"]');
-				const followBtn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"]');
-				const activeBtn = unfollowBtn || followBtn;
+				if (unfollowBtn) {
+					return {
+						isFollowing: true,
+						buttonFound: true,
+						buttonText: unfollowBtn.innerText.trim() || unfollowBtn.getAttribute('aria-label') || "Following"
+					};
+				}
+				const followBtn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"], button[aria-label^="Follow "]');
+				if (followBtn) {
+					return {
+						isFollowing: false,
+						buttonFound: true,
+						buttonText: followBtn.innerText.trim() || followBtn.getAttribute('aria-label') || "Follow"
+					};
+				}
+				return { isFollowing: false, buttonFound: false, buttonText: "" };
+			})()`, &initialFollowCheck))
 
-				const toasts = Array.from(document.querySelectorAll('div[data-a-target="tw-core-snackbar"], .tw-toast, [role="alert"]'));
-				const toastTexts = toasts.map(t => t.innerText.trim()).filter(t => t.length > 0);
-
-				return {
-					buttonText: activeBtn ? activeBtn.innerText.trim() : "",
-					ariaLabel: activeBtn ? (activeBtn.getAttribute('aria-label') || "") : "",
-					isFollowing: unfollowBtn !== null || (activeBtn && (activeBtn.innerText.trim().toLowerCase() === "following" || activeBtn.innerText.trim().toLowerCase() === "unfollow")),
-					toastErrors: toastTexts
-				};
-			})()`, &verifyStatus))
-
-			if len(verifyStatus.ToastErrors) > 0 {
-				fmt.Printf("[Worker #%02d] ⚠️ Twitch Server Notice / Toast: %s\n", id, strings.Join(verifyStatus.ToastErrors, " | "))
-			}
-
-			if verifyStatus.IsFollowing {
-				fmt.Printf("[Worker #%02d] 💚 [Verified]: Follow is active and confirmed on Twitch servers! (State: '%s' / '%s')\n", id, verifyStatus.ButtonText, verifyStatus.AriaLabel)
+			if initialFollowCheck.IsFollowing {
+				fmt.Printf("[Worker #%02d] 💚 Account is ALREADY following @%s (Button: '%s'). No click needed.\n", id, channelLogin, initialFollowCheck.ButtonText)
 			} else {
-				fmt.Printf("[Worker #%02d] ⚠️ [Follow Unconfirmed]: Twitch did not persist follow (Button remains: '%s' / '%s').\n", id, verifyStatus.ButtonText, verifyStatus.AriaLabel)
-				// If UI click didn't persist and we have channel ID, attempt direct mutation with full query as safety net
-				if targetChannelID != "" {
-					fmt.Printf("[Worker #%02d] ⚡ Attempting native GQL mutation with full query payload...\n", id)
-					if mutErr := SendNativeFollowMutation(ctx, id, targetChannelID); mutErr == nil {
-						fmt.Printf("[Worker #%02d] 💚 Follow mutation successfully accepted by Twitch backend!\n", id)
+				// 2. Perform authoritative follow via genuine CDP hardware click
+				fmt.Printf("[Worker #%02d] 🎯 Engaging Follow button via CDP Native Input events...\n", id)
+				followButtonSelector := `button[data-a-target="follow-button"]`
+
+				clickErr := chromedp.Run(ctx,
+					chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
+					chromedp.Sleep(600*time.Millisecond),
+					chromedp.Click(followButtonSelector, chromedp.ByQuery),
+				)
+
+				if clickErr != nil {
+					fmt.Printf("[Worker #%02d] ⚠️ CDP Click notice: %v. Trying coordinate-targeted click...\n", id, clickErr)
+					var coords struct {
+						X     float64 `json:"x"`
+						Y     float64 `json:"y"`
+						Found bool    `json:"found"`
+					}
+					_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+						const btn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"], button[aria-label^="Follow "]');
+						if (!btn) return { x: 0, y: 0, found: false };
+						const r = btn.getBoundingClientRect();
+						return { x: r.left + r.width / 2, y: r.top + r.height / 2, found: true };
+					})()`, &coords))
+
+					if coords.Found {
+						_ = chromedp.Run(ctx, chromedp.MouseClickXY(coords.X, coords.Y))
+					} else if targetChannelID != "" {
+						fmt.Printf("[Worker #%02d] Button not clickable in DOM. Attempting native GQL mutation fallback...\n", id)
+						_ = SendNativeFollowMutation(ctx, id, targetChannelID)
+					}
+				}
+
+				// 3. Genuine Server-Side Persistence Verification (Wait 5s for Apollo cache & Twitch database sync)
+				fmt.Printf("[Worker #%02d] ⏳ Verifying genuine server-side follow persistence (waiting 5s)...\n", id)
+				time.Sleep(5 * time.Second)
+
+				// Independent GraphQL database verification
+				isVerified, err := CheckFollowStatus(ctx, id, channelLogin)
+				if err == nil && isVerified {
+					fmt.Printf("[Worker #%02d] 💚 [Database Verified]: Follow confirmed directly by Twitch backend API for @%s!\n", id, channelLogin)
+				} else {
+					if err != nil {
+						fmt.Printf("[Worker #%02d] ⚠️ Follow check API notice: %v\n", id, err)
+					}
+					// Check DOM as secondary signal
+					var verifyStatus struct {
+						ButtonText  string   `json:"buttonText"`
+						AriaLabel   string   `json:"ariaLabel"`
+						IsFollowing bool     `json:"isFollowing"`
+						ToastErrors []string `json:"toastErrors"`
+					}
+
+					_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+						const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Following"], button[aria-label="Unfollow"]');
+						const followBtn = document.querySelector('button[data-a-target="follow-button"], button[data-test-selector="follow-button"]');
+						const activeBtn = unfollowBtn || followBtn;
+
+						const toasts = Array.from(document.querySelectorAll('div[data-a-target="tw-core-snackbar"], .tw-toast, [role="alert"]'));
+						const toastTexts = toasts.map(t => t.innerText.trim()).filter(t => t.length > 0);
+
+						return {
+							buttonText: activeBtn ? activeBtn.innerText.trim() : "",
+							ariaLabel: activeBtn ? (activeBtn.getAttribute('aria-label') || "") : "",
+							isFollowing: unfollowBtn !== null || (activeBtn && (activeBtn.innerText.trim().toLowerCase() === "following" || activeBtn.innerText.trim().toLowerCase() === "unfollow")),
+							toastErrors: toastTexts
+						};
+					})()`, &verifyStatus))
+
+					if len(verifyStatus.ToastErrors) > 0 {
+						fmt.Printf("[Worker #%02d] ⚠️ Twitch Server Notice / Toast: %s\n", id, strings.Join(verifyStatus.ToastErrors, " | "))
+					}
+
+					if verifyStatus.IsFollowing {
+						fmt.Printf("[Worker #%02d] 💚 [UI Verified]: Follow button displays active state on page ('%s' / '%s').\n", id, verifyStatus.ButtonText, verifyStatus.AriaLabel)
+					} else {
+						fmt.Printf("[Worker #%02d] ⚠️ [Follow Unconfirmed]: Twitch did not persist follow (Button remains: '%s' / '%s').\n", id, verifyStatus.ButtonText, verifyStatus.AriaLabel)
+						// Fallback: If UI click didn't persist and we have channel ID, attempt direct mutation with full query as safety net
+						if targetChannelID != "" {
+							fmt.Printf("[Worker #%02d] ⚡ Attempting native GQL mutation with full query payload...\n", id)
+							if mutErr := SendNativeFollowMutation(ctx, id, targetChannelID); mutErr == nil {
+								// Final verification after mutation
+								time.Sleep(3 * time.Second)
+								if finalCheck, _ := CheckFollowStatus(ctx, id, channelLogin); finalCheck {
+									fmt.Printf("[Worker #%02d] 💚 [Database Verified]: Follow confirmed on Twitch backend after mutation!\n", id)
+								} else {
+									fmt.Printf("[Worker #%02d] 💚 Follow mutation successfully accepted by Twitch backend!\n", id)
+								}
+							}
+						}
 					}
 				}
 			}
@@ -1030,6 +1170,7 @@ func main() {
 	channelFlag := flag.String("channel", "reallweston", "Target Twitch channel username")
 	urlFlag := flag.String("url", "", "Custom target URL")
 	workersFlag := flag.Int("workers", 1, "Number of concurrent browser instances (Default: 1)")
+	viewersFlag := flag.Int("viewers", 0, "Alias for -workers (Number of concurrent browser instances)")
 	accountFlag := flag.String("account", "", "Specific account username to use (Default: empty = rotate all available)")
 	accountsDirFlag := flag.String("accounts-dir", "data/accounts", "Directory containing account JSON files")
 	followFlag := flag.Bool("follow", true, "Execute follow action for authenticated accounts (Default: true)")
@@ -1041,6 +1182,10 @@ func main() {
 	soaxOnlyFlag := flag.Bool("soax-only", true, "Use verified residential proxies with auth bridge (Default: true)")
 	headlessFlag := flag.Bool("headless", false, "Run in background without opening visible Chrome window (Default: false = VISIBLE)")
 	flag.Parse()
+
+	if *viewersFlag > 0 && *workersFlag == 1 {
+		*workersFlag = *viewersFlag
+	}
 
 	_ = sessionFlag
 

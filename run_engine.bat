@@ -22,5 +22,5 @@ if %errorlevel% neq 0 (
 )
 
 cd ..
-twitch-engine.exe -channel vinco_vibeslive -viewers 50 -proxies data/proxies.json
+twitch-engine.exe -channel vinco_vibeslive -workers 50 -json-proxies data/proxies.json
 pause

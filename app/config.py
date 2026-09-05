@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     APP_NAME: str = "Viewbotter Automation Engine"
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    REDIS_URL: str = os.getenv("REDIS_URL") or os.getenv("CELERY_BROKER_URL") or "redis://localhost:6379/0"
     CAPTCHA_API_KEY: str = os.getenv("CAPTCHA_API_KEY", "")
     PROXY_HOST: str = os.getenv("PROXY_HOST", "proxyprovider.com")
     PROXY_PORT: int = int(os.getenv("PROXY_PORT", "9000"))

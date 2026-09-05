@@ -28,14 +28,16 @@ def run_swarm_worker(self, payload: dict):
     auto_follow = payload.get("auto_follow", True)
     auto_unlock_chat = payload.get("auto_unlock_chat", True)
     
+    duration_seconds = int(payload.get("duration_seconds", 3600))
     base_url = f"https://www.twitch.tv/{channel_name}" if platform == "twitch" else f"https://kick.com/{channel_name}"
     
     async def orchestrate():
+        stop_event = asyncio.Event()
         tasks = []
         for _ in range(viewer_count):
             tasks.append(launch_stealth_viewer_instance(
                 channel_url=base_url,
-                duration_seconds=3600,
+                duration_seconds=duration_seconds,
                 use_chat=use_chat,
                 use_ai_llm=use_ai_llm_chat,
                 auto_follow=auto_follow,
@@ -47,10 +49,16 @@ def run_swarm_worker(self, payload: dict):
             tasks.append(ChatAutomationAgent.start_chat_loop(
                 target_channel=channel_name, 
                 frequency_seconds=12,
-                use_ai=use_ai_llm_chat
+                use_ai=use_ai_llm_chat,
+                duration_seconds=duration_seconds
             ))
             
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [r for r in results if isinstance(r, Exception)]
+        if errors:
+            print(f"[TASK WARNING] {len(errors)} viewer/chat instances encountered errors:")
+            for err in errors:
+                print(f"   • {err}")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

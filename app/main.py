@@ -39,6 +39,33 @@ class CreateAccountRequest(BaseModel):
     auth_token: Optional[str] = None
     proxy_config: Optional[dict] = None
 
+class AccountPublicResponse(BaseModel):
+    account_id: str
+    username: str
+    platform: str
+    status: str
+    has_auth_token: bool
+    cookies_count: int
+    proxy_config: Optional[dict] = None
+    created_at: str
+    last_used: Optional[str] = None
+
+def sanitize_account_response(acc: AccountSession) -> AccountPublicResponse:
+    return AccountPublicResponse(
+        account_id=acc.account_id,
+        username=acc.username,
+        platform=acc.platform,
+        status=acc.status,
+        has_auth_token=bool(acc.auth_token),
+        cookies_count=len(acc.cookies),
+        proxy_config=acc.proxy_config,
+        created_at=acc.created_at,
+        last_used=acc.last_used
+    )
+
+# Track actively running swarm tasks in memory
+active_swarm_tasks: dict = {}
+
 # ==============================================================================
 # WEBSOCKET BROADCAST MANAGER (Live Telemetry & Live Chat Streaming)
 # ==============================================================================
@@ -89,16 +116,26 @@ async def get_dashboard_stats():
     ram = psutil.virtual_memory()
     net = psutil.net_io_counters()
 
-    inspector = celery_app.control.inspect()
-    active_tasks = inspector.active() or {}
-    total_active_instances = sum(len(tasks) for tasks in active_tasks.values())
+    total_viewers = sum(task.get("viewer_count", 0) for task in active_swarm_tasks.values())
+    total_chatters = sum(1 for task in active_swarm_tasks.values() if task.get("use_chat"))
+    active_plans = len(active_swarm_tasks)
+
+    # If tasks are running via celery worker inspect
+    try:
+        inspector = celery_app.control.inspect()
+        active_celery = inspector.active() or {}
+        celery_instances = sum(len(tasks) for tasks in active_celery.values())
+        if celery_instances > active_plans:
+            active_plans = celery_instances
+    except Exception:
+        pass
 
     return {
-        "active_viewers": 25,
-        "total_chatters": 8,
-        "plans_running": max(1, total_active_instances),
+        "active_viewers": total_viewers,
+        "total_chatters": total_chatters,
+        "plans_running": active_plans,
         "proxy_bandwidth_mb": round((net.bytes_sent + net.bytes_recv) / (1024 * 1024), 2),
-        "chat_messages_per_min": 14,
+        "chat_messages_per_min": total_chatters * 5 if total_chatters > 0 else 0,
         "system_telemetry": {
             "cpu_percent": cpu_usage,
             "ram_used_mb": round(ram.used / (1024 * 1024), 1),
@@ -115,6 +152,8 @@ async def start_stream_swarm(payload: StreamTaskRequest):
     # Enforces custom user-selected instance count without arbitrary trial barriers
     task = run_swarm_worker.delay(payload.model_dump())
     
+    active_swarm_tasks[task.id] = payload.model_dump()
+
     # Broadcast new task event to connected frontend WebSockets
     asyncio.create_task(ws_manager.broadcast({
         "type": "task_started",
@@ -136,6 +175,7 @@ async def start_stream_swarm(payload: StreamTaskRequest):
 @app.post("/api/tasks/stop")
 async def stop_stream_swarm(task_id: str):
     celery_app.control.revoke(task_id, terminate=True)
+    active_swarm_tasks.pop(task_id, None)
     asyncio.create_task(ws_manager.broadcast({
         "type": "task_stopped",
         "task_id": task_id
@@ -143,13 +183,14 @@ async def stop_stream_swarm(task_id: str):
     return {"status": "success", "message": f"Task {task_id} terminated."}
 
 # ==============================================================================
-# 3. ACCOUNT & SESSION MANAGEMENT
+# 3. ACCOUNT & SESSION MANAGEMENT (Masked Sensitive Credentials)
 # ==============================================================================
-@app.get("/api/accounts", response_model=List[AccountSession])
+@app.get("/api/accounts", response_model=List[AccountPublicResponse])
 async def list_accounts(platform: Optional[str] = None):
-    return AccountManager.list_accounts(platform)
+    accounts = AccountManager.list_accounts(platform)
+    return [sanitize_account_response(acc) for acc in accounts]
 
-@app.post("/api/accounts", response_model=AccountSession)
+@app.post("/api/accounts", response_model=AccountPublicResponse)
 async def create_account(payload: CreateAccountRequest):
     session = AccountManager.create_account(
         account_id=payload.account_id,
@@ -158,14 +199,14 @@ async def create_account(payload: CreateAccountRequest):
         auth_token=payload.auth_token,
         proxy_config=payload.proxy_config
     )
-    return session
+    return sanitize_account_response(session)
 
-@app.get("/api/accounts/{account_id}", response_model=AccountSession)
+@app.get("/api/accounts/{account_id}", response_model=AccountPublicResponse)
 async def get_account(account_id: str):
     acc = AccountManager.get_account(account_id)
     if not acc:
         raise HTTPException(status_code=404, detail="Account not found")
-    return acc
+    return sanitize_account_response(acc)
 
 @app.delete("/api/accounts/{account_id}")
 async def delete_account(account_id: str):

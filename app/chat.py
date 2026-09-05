@@ -79,11 +79,13 @@ class ChatAutomationAgent:
         cls, 
         target_channel: str, 
         frequency_seconds: int = 12,
-        use_ai: bool = True
+        use_ai: bool = True,
+        duration_seconds: Optional[int] = None
     ):
         recent_observed_messages = ["stream looks good today", "yo what's up chat", "insane play"]
+        elapsed = 0.0
         
-        while True:
+        while duration_seconds is None or elapsed < duration_seconds:
             if use_ai:
                 message = await AIChatEngine.generate_contextual_message(
                     target_channel, 
@@ -100,4 +102,10 @@ class ChatAutomationAgent:
             # Human-like pacing with randomized jitter
             jitter = random.uniform(-2.5, 3.0)
             sleep_duration = max(3.0, frequency_seconds + jitter)
+            if duration_seconds is not None and elapsed + sleep_duration > duration_seconds:
+                remaining = duration_seconds - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                break
             await asyncio.sleep(sleep_duration)
+            elapsed += sleep_duration

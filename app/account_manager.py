@@ -24,8 +24,18 @@ class AccountManager:
     """Manages persistent account sessions, auth tokens, and fixed hardware profiles."""
     
     @staticmethod
-    def _get_account_file(account_id: str) -> str:
-        return os.path.join(ACCOUNTS_DIR, f"{account_id}.json")
+    def _sanitize_account_id(account_id: str) -> str:
+        safe_id = os.path.basename(account_id).strip()
+        # Ensure only alphanumeric, underscore, hyphen, and dot are allowed
+        safe_id = "".join(c for c in safe_id if c.isalnum() or c in ("-", "_", "."))
+        if not safe_id:
+            raise ValueError(f"Invalid account ID: {account_id}")
+        return safe_id
+
+    @classmethod
+    def _get_account_file(cls, account_id: str) -> str:
+        safe_id = cls._sanitize_account_id(account_id)
+        return os.path.join(ACCOUNTS_DIR, f"{safe_id}.json")
 
     @classmethod
     def create_account(
