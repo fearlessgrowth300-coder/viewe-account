@@ -339,7 +339,28 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 
 	fmt.Printf("[Worker #%02d] Locating follow button...\n", id)
 
-	// 1. Wait for the button to appear on screen
+	// 1. Check if already following first
+	var alreadyFollowing bool
+	_ = chromedp.Run(ctx, chromedp.Evaluate(`
+		(() => {
+			const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Unfollow"], button[aria-label="Following"]');
+			if (unfollowBtn && unfollowBtn.offsetParent !== null) return true;
+			const followBtns = document.querySelectorAll('button[data-a-target="follow-button"]');
+			for (const b of followBtns) {
+				if (b.closest('[data-a-target="side-nav"]')) continue;
+				const txt = (b.innerText || '').trim().toLowerCase();
+				if (txt === 'following' || txt === 'unfollow') return true;
+			}
+			return false;
+		})()
+	`, &alreadyFollowing))
+
+	if alreadyFollowing {
+		fmt.Printf("[Worker #%02d] 💚 [Success] Follow verified and locked permanently (already followed).\n", id)
+		return nil
+	}
+
+	// Wait for the button to appear on screen
 	if err := chromedp.Run(ctx, chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery)); err != nil {
 		return fmt.Errorf("follow button not found: %v", err)
 	}
@@ -348,7 +369,7 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 	fmt.Printf("[Worker #%02d] Sending humanized mouse events to follow button...\n", id)
 	err := chromedp.Run(ctx,
 		chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
-		chromedp.Sleep(300*time.Millisecond),
+		chromedp.Sleep(400*time.Millisecond),
 		chromedp.Click(followButtonSelector, chromedp.ByQuery), // Clicks the button
 		chromedp.Sleep(4*time.Second),                         // CRITICAL: Gives Twitch 4 seconds to register the action
 	)
@@ -356,42 +377,73 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 		return err
 	}
 
-	// 3. VERIFICATION PHASE: Read the button state via JavaScript
+	// 3. VERIFICATION PHASE: Accurately check if follow succeeded
 	fmt.Printf("[Worker #%02d] Verifying if follow was registered by Twitch servers...\n", id)
 	var isStillFollowButton bool
 
-	// This JavaScript checks if the button still says "Follow". 
-	// If it returns true, it means the click bounced back and failed.
-	err = chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(function() {
-		var btn = document.querySelector('%s');
-		if (!btn) return false;
-		// If the text inside contains "Follow", the action failed/reverted
-		return btn.innerText.includes("Follow");
-	})()`, followButtonSelector), &isStillFollowButton))
+	// Accurate check:
+	// A follow SUCCEEDS if:
+	// - button[data-a-target="unfollow-button"] is present
+	// - button text is "Following" or "Unfollow"
+	// It ONLY failed if button[data-a-target="follow-button"] still strictly says "Follow"
+	err = chromedp.Run(ctx, chromedp.Evaluate(`(function() {
+		// 1. If unfollow button is present, follow definitely succeeded!
+		const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Unfollow"], button[aria-label="Following"]');
+		if (unfollowBtn && unfollowBtn.offsetParent !== null) {
+			return false; // NOT still a follow button -> success!
+		}
+
+		// 2. Check main follow button (skip sidebar recommended channels)
+		const followBtns = document.querySelectorAll('button[data-a-target="follow-button"]');
+		for (const btn of followBtns) {
+			if (btn.closest('[data-a-target="side-nav"]')) continue;
+			const txt = (btn.innerText || "").trim().toLowerCase();
+			const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+
+			// If it changed to "following" or "unfollow", follow succeeded!
+			if (txt === "following" || label === "following" || txt === "unfollow" || label === "unfollow") {
+				return false; // NOT still a follow button -> success!
+			}
+
+			// If it strictly still says "follow", it bounced or didn't register
+			if (txt === "follow" || label === "follow") {
+				return true; // Still follow button -> failed/reverted
+			}
+		}
+
+		return false; // Default: button morphed into unfollow state -> success!
+	})()`, &isStillFollowButton))
 
 	if err != nil {
 		return fmt.Errorf("failed to read button state: %v", err)
 	}
 
 	if isStillFollowButton {
-		// ❌ THE BLOCK DETECTED: The button reverted back to "Follow"
+		// ❌ THE BLOCK DETECTED: The button strictly stayed "Follow"
 		fmt.Printf("[Worker #%02d] ⚠️ Alert: Follow reverted! Anti-bot mitigation triggered. Attempting a page refresh...\n", id)
 
-		// Alternative Recovery Path: Refresh the page and try one more time
+		// Alternative Recovery Path: Refresh the page, allow hydration, and re-click
 		_ = chromedp.Run(ctx,
 			chromedp.Reload(),
-			chromedp.Sleep(5*time.Second),
+			chromedp.Sleep(6*time.Second),
 			chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery),
 			chromedp.Click(followButtonSelector, chromedp.ByQuery),
-			chromedp.Sleep(3*time.Second),
+			chromedp.Sleep(4*time.Second),
 		)
 
 		var recoveryStillFollow bool
-		_ = chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(function() {
-			var btn = document.querySelector('%s');
-			if (!btn) return false;
-			return btn.innerText.includes("Follow");
-		})()`, followButtonSelector), &recoveryStillFollow))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`(function() {
+			const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Unfollow"], button[aria-label="Following"]');
+			if (unfollowBtn && unfollowBtn.offsetParent !== null) return false;
+			const followBtns = document.querySelectorAll('button[data-a-target="follow-button"]');
+			for (const btn of followBtns) {
+				if (btn.closest('[data-a-target="side-nav"]')) continue;
+				const txt = (btn.innerText || "").trim().toLowerCase();
+				if (txt === "following" || txt === "unfollow") return false;
+				if (txt === "follow") return true;
+			}
+			return false;
+		})()`, &recoveryStillFollow))
 
 		if !recoveryStillFollow {
 			fmt.Printf("[Worker #%02d] 💚 Recovery Success! Follow verified and locked permanently after refresh.\n", id)
@@ -401,7 +453,7 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 		return fmt.Errorf("initial follow rejected by platform security tracker")
 	}
 
-	// 💚 SUCCESS: The button changed to "Unfollow" or the heart remained locked
+	// 💚 SUCCESS: The button changed to "Unfollow" or "Following"
 	fmt.Printf("[Worker #%02d] 💚 Success! Follow verified and locked permanently.\n", id)
 	return nil
 }
@@ -467,21 +519,22 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		`, nil),
 	)
 
-	// 3. Execute Follow Action with Validation Verification Loop
+	// 3. Execute Follow Action with Human Warmup and Validation Verification Loop
 	if shouldFollow {
-		time.Sleep(3 * time.Second)
-		unfollowSelector := `button[data-a-target="unfollow-button"], button[aria-label="Unfollow"]`
-		var isFollowing bool
+		// Human Warmup: allow stream video player and integrity handshake to settle
+		fmt.Printf("[Worker #%02d] 🕒 Simulating human viewer warmup (8s) before follow action...\n", id)
+		time.Sleep(8 * time.Second)
+
+		// Emulate gentle scrolling
 		_ = chromedp.Run(ctx,
-			chromedp.Evaluate(fmt.Sprintf(`document.querySelector('%s') !== null`, unfollowSelector), &isFollowing),
+			chromedp.Evaluate(`window.scrollBy({ top: 250, behavior: 'smooth' })`, nil),
+			chromedp.Sleep(1500*time.Millisecond),
+			chromedp.Evaluate(`window.scrollBy({ top: -250, behavior: 'smooth' })`, nil),
+			chromedp.Sleep(1000*time.Millisecond),
 		)
 
-		if isFollowing {
-			fmt.Printf("[Worker #%02d] ℹ️ [Success] Account @%s is ALREADY following this channel.\n", id, account.Username)
-		} else {
-			if err := executeAndVerifyFollow(ctx, id); err != nil {
-				fmt.Printf("[Worker #%02d] [Follow Notice]: %v\n", id, err)
-			}
+		if err := executeAndVerifyFollow(ctx, id); err != nil {
+			fmt.Printf("[Worker #%02d] [Follow Notice]: %v\n", id, err)
 		}
 	}
 
