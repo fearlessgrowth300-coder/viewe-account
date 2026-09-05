@@ -10,7 +10,6 @@ import (
 	"io"
 	"math/rand"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -39,9 +38,9 @@ type LocalProxyConfig struct {
 }
 
 type ProxyEndpoint struct {
-	DisplayName   string
-	ChromeProxyURL string // Unauthenticated URL passed to Chrome --proxy-server
-	StopBridge     func() // Closes local auth bridge if running
+	DisplayName    string
+	ChromeProxyURL string
+	StopBridge     func()
 }
 
 type ViewerJob struct {
@@ -49,39 +48,82 @@ type ViewerJob struct {
 	Proxy     ProxyEndpoint
 }
 
-// handleProxyClient tunnels Chrome's HTTP/HTTPS traffic through the authenticated upstream proxy
+// readHTTPHeaderBytes reads raw header bytes until \r\n\r\n without buffering extra stream bytes
+func readHTTPHeaderBytes(r io.Reader) ([]byte, error) {
+	var buf []byte
+	b := make([]byte, 1)
+	for {
+		n, err := r.Read(b)
+		if n > 0 {
+			buf = append(buf, b[0])
+			if len(buf) >= 4 && string(buf[len(buf)-4:]) == "\r\n\r\n" {
+				return buf, nil
+			}
+			if len(buf) > 8192 { // safety limit
+				return nil, fmt.Errorf("header too large")
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// handleProxyClient safely establishes an unbuffered HTTP CONNECT tunnel to the upstream proxy
 func handleProxyClient(clientConn net.Conn, upstreamHost, authHeader string) {
 	defer clientConn.Close()
 
-	req, err := http.ReadRequest(bufio.NewReader(clientConn))
+	headerBytes, err := readHTTPHeaderBytes(clientConn)
 	if err != nil {
 		return
 	}
 
-	upstreamConn, err := net.DialTimeout("tcp", upstreamHost, 12*time.Second)
+	headerStr := string(headerBytes)
+	lines := strings.Split(headerStr, "\r\n")
+	if len(lines) == 0 {
+		return
+	}
+
+	reqLine := lines[0]
+	parts := strings.Split(reqLine, " ")
+	if len(parts) < 2 {
+		return
+	}
+
+	method := parts[0]
+	targetHost := parts[1]
+
+	upstreamConn, err := net.DialTimeout("tcp", upstreamHost, 15*time.Second)
 	if err != nil {
 		return
 	}
 	defer upstreamConn.Close()
 
-	if req.Method == "CONNECT" {
-		// Send CONNECT tunnel with Proxy-Authorization header
+	if method == "CONNECT" {
+		// Clean HTTP CONNECT request with Proxy-Authorization
 		connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\nProxy-Connection: Keep-Alive\r\n\r\n",
-			req.URL.Host, req.URL.Host, authHeader)
+			targetHost, targetHost, authHeader)
 		if _, err := upstreamConn.Write([]byte(connectReq)); err != nil {
 			return
 		}
 
-		resp, err := http.ReadResponse(bufio.NewReader(upstreamConn), req)
-		if err != nil || resp.StatusCode != 200 {
+		// Read upstream response without buffering TLS payload
+		respBytes, err := readHTTPHeaderBytes(upstreamConn)
+		if err != nil {
 			return
 		}
 
+		respFirstLine := strings.Split(string(respBytes), "\r\n")[0]
+		if !strings.Contains(respFirstLine, "200") {
+			return
+		}
+
+		// Notify Chrome that connection is ready
 		if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 			return
 		}
 
-		// Bidirectional stream copy
+		// Pure unbuffered bidirectional streaming
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -96,22 +138,18 @@ func handleProxyClient(clientConn net.Conn, upstreamHost, authHeader string) {
 		}()
 		wg.Wait()
 	} else {
-		req.Header.Set("Proxy-Authorization", authHeader)
-		if err := req.Write(upstreamConn); err != nil {
-			return
-		}
+		// Plain HTTP request
+		newHeader := strings.Replace(headerStr, "\r\n\r\n", fmt.Sprintf("\r\nProxy-Authorization: %s\r\n\r\n", authHeader), 1)
+		upstreamConn.Write([]byte(newHeader))
 		io.Copy(clientConn, upstreamConn)
 	}
 }
 
-// startLocalProxyBridge creates a local unauthenticated bridge for proxies that require credentials
+// startLocalProxyBridge creates a local listener that handles SOAX authentication
 func startLocalProxyBridge(server, username, password string) (string, func(), error) {
 	cleanServer := server
-	if strings.HasPrefix(cleanServer, "http://") {
-		cleanServer = strings.TrimPrefix(cleanServer, "http://")
-	} else if strings.HasPrefix(cleanServer, "https://") {
-		cleanServer = strings.TrimPrefix(cleanServer, "https://")
-	}
+	cleanServer = strings.TrimPrefix(cleanServer, "http://")
+	cleanServer = strings.TrimPrefix(cleanServer, "https://")
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -142,7 +180,6 @@ func startLocalProxyBridge(server, username, password string) (string, func(), e
 	return localProxyURL, stop, nil
 }
 
-// loadProxies builds proxy endpoints, bridging authenticated residential proxies
 func loadProxies(txtPath, jsonPath string, soaxOnly bool) []ProxyEndpoint {
 	var endpoints []ProxyEndpoint
 
@@ -155,7 +192,7 @@ func loadProxies(txtPath, jsonPath string, soaxOnly bool) []ProxyEndpoint {
 					localURL, stopBridge, err := startLocalProxyBridge(lp.Server, lp.Username, lp.Password)
 					if err == nil {
 						endpoints = append(endpoints, ProxyEndpoint{
-							DisplayName:   fmt.Sprintf("%s (%s, %s)", lp.Name, lp.City, lp.Country),
+							DisplayName:    fmt.Sprintf("%s (%s, %s)", lp.Name, lp.City, lp.Country),
 							ChromeProxyURL: localURL,
 							StopBridge:     stopBridge,
 						})
@@ -170,7 +207,7 @@ func loadProxies(txtPath, jsonPath string, soaxOnly bool) []ProxyEndpoint {
 		return endpoints
 	}
 
-	// 2. Unauthenticated public proxies from txt file
+	// 2. Public proxies from txt file
 	if file, err := os.Open(txtPath); err == nil {
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
@@ -182,7 +219,7 @@ func loadProxies(txtPath, jsonPath string, soaxOnly bool) []ProxyEndpoint {
 				u, err := url.Parse(line)
 				if err == nil && u.Hostname() != "0.0.0.0" && u.Hostname() != "127.0.0.1" {
 					endpoints = append(endpoints, ProxyEndpoint{
-						DisplayName:   line,
+						DisplayName:    line,
 						ChromeProxyURL: line,
 						StopBridge:     func() {},
 					})
@@ -195,8 +232,7 @@ func loadProxies(txtPath, jsonPath string, soaxOnly bool) []ProxyEndpoint {
 	return endpoints
 }
 
-// runBrowserWorker manages headless Chrome sessions without auth errors
-func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sync.WaitGroup, sessionMinutes int) {
+func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sync.WaitGroup, sessionMinutes int, headless bool) {
 	defer wg.Done()
 
 	for {
@@ -213,21 +249,24 @@ func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sy
 			if displayName == "" {
 				displayName = "Direct"
 			}
-			fmt.Printf("[Worker #%02d] 🌐 Launching Headless Chrome via: %s\n", id, displayName)
+			fmt.Printf("[Worker #%02d] 🌐 Launching Chrome (Headless: %v) via: %s\n", id, headless, displayName)
 
-			// Chrome Flags: clean proxy URL with no username/password embedded
 			execOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-				chromedp.Flag("headless", true),
+				chromedp.Flag("headless", headless),
 				chromedp.Flag("ignore-certificate-errors", true),
 				chromedp.Flag("allow-running-insecure-content", true),
 				chromedp.Flag("mute-audio", true),
-				chromedp.Flag("blink-settings", "imagesEnabled=false"),
 				chromedp.Flag("disable-gpu", true),
-				chromedp.Flag("disable-extensions", true),
 				chromedp.Flag("disable-dev-shm-usage", true),
 				chromedp.Flag("no-sandbox", true),
 				chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
 			)
+
+			if !headless {
+				execOpts = append(execOpts, chromedp.Flag("start-maximized", true))
+			} else {
+				execOpts = append(execOpts, chromedp.Flag("blink-settings", "imagesEnabled=false"))
+			}
 
 			if proxyURL != "" {
 				execOpts = append(execOpts, chromedp.Flag("proxy-server", proxyURL))
@@ -235,7 +274,7 @@ func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sy
 
 			allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, execOpts...)
 			browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
-			navCtx, cancelNav := context.WithTimeout(browserCtx, 45*time.Second)
+			navCtx, cancelNav := context.WithTimeout(browserCtx, 60*time.Second)
 
 			fmt.Printf("[Worker #%02d] Navigating to %s...\n", id, job.TargetURL)
 			navErr := chromedp.Run(navCtx,
@@ -254,7 +293,7 @@ func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sy
 
 			atomic.AddInt64(&activeWorkers, 1)
 			current := atomic.LoadInt64(&activeWorkers)
-			fmt.Printf("[Worker #%02d] 💚 Connection active on stream! Active Browsers: %d\n", id, current)
+			fmt.Printf("[Worker #%02d] 💚 Stream loaded in Chrome! Active Windows/Browsers: %d\n", id, current)
 
 			sessionDuration := time.Duration(sessionMinutes)*time.Minute + time.Duration(rand.Intn(30))*time.Second
 			select {
@@ -265,7 +304,7 @@ func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sy
 			atomic.AddInt64(&activeWorkers, -1)
 			cancelBrowser()
 			cancelAlloc()
-			fmt.Printf("[Worker #%02d] Session completed. Browser closed.\n", id)
+			fmt.Printf("[Worker #%02d] Session completed. Closed browser window.\n", id)
 		}
 	}
 }
@@ -273,12 +312,13 @@ func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sy
 func main() {
 	channelFlag := flag.String("channel", "agenciapx", "Target Twitch channel username")
 	urlFlag := flag.String("url", "", "Custom target URL")
-	workersFlag := flag.Int("workers", 3, "Number of concurrent headless browsers")
+	workersFlag := flag.Int("workers", 2, "Number of concurrent browser instances (Default: 2)")
 	proxiesPath := flag.String("proxies", "proxies.txt", "Path to proxies.txt")
 	jsonPath := flag.String("json-proxies", "data/proxies.json", "Path to data/proxies.json")
 	sessionFlag := flag.Int("session-duration", 15, "Session duration per browser in minutes")
 	totalDurationFlag := flag.Int("duration", 0, "Total runtime in minutes (0 for infinite)")
 	soaxOnlyFlag := flag.Bool("soax-only", true, "Use verified residential proxies with auth bridge (Default: true)")
+	headlessFlag := flag.Bool("headless", false, "Run in background without opening visible Chrome window (Default: false = VISIBLE)")
 	flag.Parse()
 
 	targetStream := *urlFlag
@@ -289,12 +329,17 @@ func main() {
 		targetStream = fmt.Sprintf("https://www.twitch.tv/%s", channel)
 	}
 
+	modeStr := "VISIBLE on your screen"
+	if *headlessFlag {
+		modeStr = "HEADLESS (invisible in background)"
+	}
+
 	fmt.Println("==================================================================")
-	fmt.Println("⚡ GO CHROMEDP HEADLESS ENGINE (WITH LOCAL AUTH PROXY BRIDGE)")
+	fmt.Println("⚡ GO CHROMEDP ENGINE (VISIBLE BROWSER + SOAX AUTH TUNNEL)")
 	fmt.Printf("   Target Stream:     %s\n", targetStream)
-	fmt.Printf("   Workers:           %d instances\n", *workersFlag)
+	fmt.Printf("   Active Workers:    %d windows\n", *workersFlag)
+	fmt.Printf("   Display Mode:      %s\n", modeStr)
 	fmt.Printf("   Session Duration:  %d minutes\n", *sessionFlag)
-	fmt.Printf("   SOAX Auth Bridge:  %v\n", *soaxOnlyFlag)
 	fmt.Println("==================================================================")
 
 	txtFile := *proxiesPath
@@ -314,7 +359,6 @@ func main() {
 		fmt.Printf("\n🎯 Active Rotation Pool: %d verified proxy endpoints ready.\n\n", len(proxyPool))
 	}
 
-	// Defer bridge cleanups on exit
 	defer func() {
 		for _, p := range proxyPool {
 			if p.StopBridge != nil {
@@ -336,7 +380,7 @@ func main() {
 
 	for w := 1; w <= *workersFlag; w++ {
 		wg.Add(1)
-		go runBrowserWorker(ctx, w, jobChannel, &wg, *sessionFlag)
+		go runBrowserWorker(ctx, w, jobChannel, &wg, *sessionFlag, *headlessFlag)
 	}
 
 	go func() {
@@ -351,7 +395,7 @@ func main() {
 				Proxy:     proxyPool[idx%len(proxyPool)],
 			}:
 				idx++
-				time.Sleep(500 * time.Millisecond)
+				time.Sleep(1 * time.Second)
 			}
 		}
 	}()
