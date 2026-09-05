@@ -334,6 +334,78 @@ func getAccountProxy(account *UserAccount, proxyPool []ProxyEndpoint) ProxyEndpo
 	return assigned
 }
 
+func executeAndVerifyFollow(ctx context.Context, id int) error {
+	followButtonSelector := `button[data-a-target="follow-button"]`
+
+	fmt.Printf("[Worker #%02d] Locating follow button...\n", id)
+
+	// 1. Wait for the button to appear on screen
+	if err := chromedp.Run(ctx, chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery)); err != nil {
+		return fmt.Errorf("follow button not found: %v", err)
+	}
+
+	// 2. Perform the Human-Like Mouse Click sequence
+	fmt.Printf("[Worker #%02d] Sending humanized mouse events to follow button...\n", id)
+	err := chromedp.Run(ctx,
+		chromedp.ScrollIntoView(followButtonSelector, chromedp.ByQuery),
+		chromedp.Sleep(300*time.Millisecond),
+		chromedp.Click(followButtonSelector, chromedp.ByQuery), // Clicks the button
+		chromedp.Sleep(4*time.Second),                         // CRITICAL: Gives Twitch 4 seconds to register the action
+	)
+	if err != nil {
+		return err
+	}
+
+	// 3. VERIFICATION PHASE: Read the button state via JavaScript
+	fmt.Printf("[Worker #%02d] Verifying if follow was registered by Twitch servers...\n", id)
+	var isStillFollowButton bool
+
+	// This JavaScript checks if the button still says "Follow". 
+	// If it returns true, it means the click bounced back and failed.
+	err = chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(function() {
+		var btn = document.querySelector('%s');
+		if (!btn) return false;
+		// If the text inside contains "Follow", the action failed/reverted
+		return btn.innerText.includes("Follow");
+	})()`, followButtonSelector), &isStillFollowButton))
+
+	if err != nil {
+		return fmt.Errorf("failed to read button state: %v", err)
+	}
+
+	if isStillFollowButton {
+		// ❌ THE BLOCK DETECTED: The button reverted back to "Follow"
+		fmt.Printf("[Worker #%02d] ⚠️ Alert: Follow reverted! Anti-bot mitigation triggered. Attempting a page refresh...\n", id)
+
+		// Alternative Recovery Path: Refresh the page and try one more time
+		_ = chromedp.Run(ctx,
+			chromedp.Reload(),
+			chromedp.Sleep(5*time.Second),
+			chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery),
+			chromedp.Click(followButtonSelector, chromedp.ByQuery),
+			chromedp.Sleep(3*time.Second),
+		)
+
+		var recoveryStillFollow bool
+		_ = chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(`(function() {
+			var btn = document.querySelector('%s');
+			if (!btn) return false;
+			return btn.innerText.includes("Follow");
+		})()`, followButtonSelector), &recoveryStillFollow))
+
+		if !recoveryStillFollow {
+			fmt.Printf("[Worker #%02d] 💚 Recovery Success! Follow verified and locked permanently after refresh.\n", id)
+			return nil
+		}
+
+		return fmt.Errorf("initial follow rejected by platform security tracker")
+	}
+
+	// 💚 SUCCESS: The button changed to "Unfollow" or the heart remained locked
+	fmt.Printf("[Worker #%02d] 💚 Success! Follow verified and locked permanently.\n", id)
+	return nil
+}
+
 // performAccountActions manages the lifecycle of an authenticated worker window
 func performAccountActions(ctx context.Context, id int, account *UserAccount, targetURL string, shouldFollow bool) error {
 	if account == nil {
@@ -395,7 +467,7 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		`, nil),
 	)
 
-	// 3. Execute Follow Action if requested
+	// 3. Execute Follow Action with Validation Verification Loop
 	if shouldFollow {
 		time.Sleep(3 * time.Second)
 		unfollowSelector := `button[data-a-target="unfollow-button"], button[aria-label="Unfollow"]`
@@ -407,19 +479,8 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		if isFollowing {
 			fmt.Printf("[Worker #%02d] ℹ️ [Success] Account @%s is ALREADY following this channel.\n", id, account.Username)
 		} else {
-			fmt.Printf("[Worker #%02d] 💜 Locating and clicking the follow button for @%s...\n", id, account.Username)
-			followButtonSelector := `button[data-a-target="follow-button"]`
-
-			followErr := chromedp.Run(ctx,
-				chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery),
-				chromedp.Sleep(1500*time.Millisecond),
-				chromedp.Click(followButtonSelector, chromedp.ByQuery),
-				chromedp.Sleep(2000*time.Millisecond),
-			)
-			if followErr != nil {
-				fmt.Printf("[Worker #%02d] [Warning] Follow button could not be clicked: %v\n", id, followErr)
-			} else {
-				fmt.Printf("[Worker #%02d] 💜 [Success] Follow action executed successfully for @%s.\n", id, account.Username)
+			if err := executeAndVerifyFollow(ctx, id); err != nil {
+				fmt.Printf("[Worker #%02d] [Follow Notice]: %v\n", id, err)
 			}
 		}
 	}
