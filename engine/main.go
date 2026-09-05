@@ -231,99 +231,74 @@ func loadProxies(txtPath, jsonPath string, soaxOnly bool) []ProxyEndpoint {
 	return endpoints
 }
 
-func runBrowserWorker(ctx context.Context, id int, jobs <-chan ViewerJob, wg *sync.WaitGroup, sessionMinutes int, headless bool) {
+func runBrowserWorker(ctx context.Context, id int, targetURL string, proxy ProxyEndpoint, wg *sync.WaitGroup, headless bool) {
 	defer wg.Done()
+
+	proxyURL := proxy.ChromeProxyURL
+	displayName := proxy.DisplayName
+	if displayName == "" {
+		displayName = "Direct"
+	}
+	fmt.Printf("[Worker #%02d] 🌐 Launching Chrome (Headless: %v) via: %s\n", id, headless, displayName)
+
+	execOpts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", headless),
+		chromedp.Flag("ignore-certificate-errors", true),
+		chromedp.Flag("allow-running-insecure-content", true),
+		chromedp.Flag("mute-audio", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+	)
+
+	if !headless {
+		execOpts = append(execOpts, chromedp.Flag("start-maximized", true))
+	} else {
+		execOpts = append(execOpts, chromedp.Flag("blink-settings", "imagesEnabled=false"))
+	}
+
+	if proxyURL != "" {
+		execOpts = append(execOpts, chromedp.Flag("proxy-server", proxyURL))
+	}
+
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, execOpts...)
+	defer cancelAlloc()
+
+	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
+	defer cancelBrowser()
+
+	fmt.Printf("[Worker #%02d] Navigating to %s...\n", id, targetURL)
+	// Issue navigation without aggressive timeout so Chrome keeps loading naturally
+	_ = chromedp.Run(browserCtx,
+		chromedp.Navigate(targetURL),
+	)
+
+	atomic.AddInt64(&activeWorkers, 1)
+	defer atomic.AddInt64(&activeWorkers, -1)
+
+	current := atomic.LoadInt64(&activeWorkers)
+	fmt.Printf("[Worker #%02d] 💚 Chrome window open and permanently locked! Active Windows: %d\n", id, current)
+
+	// 5. Keep-Alive Loop: Window stays open permanently until user interrupts (Ctrl+C)
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Printf("[Worker #%02d] Stop signal received. Closing Chrome window.\n", id)
 			return
-		case job, ok := <-jobs:
-			if !ok {
-				return
-			}
-
-			proxyURL := job.Proxy.ChromeProxyURL
-			displayName := job.Proxy.DisplayName
-			if displayName == "" {
-				displayName = "Direct"
-			}
-			fmt.Printf("[Worker #%02d] 🌐 Launching Chrome (Headless: %v) via: %s\n", id, headless, displayName)
-
-			execOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-				chromedp.Flag("headless", headless),
-				chromedp.Flag("ignore-certificate-errors", true),
-				chromedp.Flag("allow-running-insecure-content", true),
-				chromedp.Flag("mute-audio", true),
-				chromedp.Flag("disable-gpu", true),
-				chromedp.Flag("disable-dev-shm-usage", true),
-				chromedp.Flag("no-sandbox", true),
-				chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+		case <-ticker.C:
+			var offlineMessage string
+			// Soft check if stream ended or went offline (does NOT close the window)
+			_ = chromedp.Run(browserCtx,
+				chromedp.Evaluate(`document.querySelector(".offline-embed, .stream-ended-indicator") ? "offline" : "live"`, &offlineMessage),
 			)
 
-			if !headless {
-				execOpts = append(execOpts, chromedp.Flag("start-maximized", true))
-			} else {
-				execOpts = append(execOpts, chromedp.Flag("blink-settings", "imagesEnabled=false"))
+			if offlineMessage == "offline" {
+				fmt.Printf("[Worker #%02d] 🔴 Broadcaster went offline (window remains open).\n", id)
 			}
-
-			if proxyURL != "" {
-				execOpts = append(execOpts, chromedp.Flag("proxy-server", proxyURL))
-			}
-
-			allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, execOpts...)
-			browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
-			navCtx, cancelNav := context.WithTimeout(browserCtx, 60*time.Second)
-
-			fmt.Printf("[Worker #%02d] Navigating to %s...\n", id, job.TargetURL)
-			navErr := chromedp.Run(navCtx,
-				chromedp.Navigate(job.TargetURL),
-				chromedp.WaitVisible(`body`, chromedp.ByQuery),
-			)
-			cancelNav()
-
-			if navErr != nil {
-				fmt.Printf("[Worker #%02d] ❌ Session failed (rotating proxy): %v\n", id, navErr)
-				cancelBrowser()
-				cancelAlloc()
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			atomic.AddInt64(&activeWorkers, 1)
-			current := atomic.LoadInt64(&activeWorkers)
-			fmt.Printf("[Worker #%02d] 💚 Stream loaded in Chrome! Active Windows/Browsers: %d\n", id, current)
-
-			// 5. Infinite Keep-Alive & Live Status Check Loop
-			// Instead of closing every 15 minutes, this keeps the browser open indefinitely
-			fmt.Printf("[Worker #%02d] 💚 Stream session locked. Monitoring channel status infinitely...\n", id)
-
-			for {
-				select {
-				case <-ctx.Done():
-					fmt.Printf("[Worker #%02d] Stop signal received. Closing browser instance.\n", id)
-					goto cleanup
-				case <-time.After(60 * time.Second):
-				}
-
-				var offlineMessage string
-				// Evaluates Javascript inside Chrome to check if stream ended or went offline
-				err := chromedp.Run(browserCtx,
-					chromedp.Evaluate(`document.querySelector(".offline-embed, .stream-ended-indicator") ? "offline" : "live"`, &offlineMessage),
-				)
-
-				if err == nil && offlineMessage == "offline" {
-					fmt.Printf("[Worker #%02d] 🔴 Stream has ended or channel went offline. Shutting down browser.\n", id)
-					break
-				}
-			}
-
-		cleanup:
-
-			atomic.AddInt64(&activeWorkers, -1)
-			cancelBrowser()
-			cancelAlloc()
-			fmt.Printf("[Worker #%02d] Session completed. Closed browser window.\n", id)
 		}
 	}
 }
@@ -339,6 +314,8 @@ func main() {
 	soaxOnlyFlag := flag.Bool("soax-only", true, "Use verified residential proxies with auth bridge (Default: true)")
 	headlessFlag := flag.Bool("headless", false, "Run in background without opening visible Chrome window (Default: false = VISIBLE)")
 	flag.Parse()
+
+	_ = sessionFlag
 
 	targetStream := *urlFlag
 	if targetStream == "" {
@@ -358,7 +335,7 @@ func main() {
 	fmt.Printf("   Target Stream:     %s\n", targetStream)
 	fmt.Printf("   Active Workers:    %d windows\n", *workersFlag)
 	fmt.Printf("   Display Mode:      %s\n", modeStr)
-	fmt.Printf("   Session Duration:  %d minutes\n", *sessionFlag)
+	fmt.Println("   Window Persistence: Permanently open (until Ctrl+C)")
 	fmt.Println("==================================================================")
 
 	txtFile := *proxiesPath
@@ -395,29 +372,16 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	var wg sync.WaitGroup
-	jobChannel := make(chan ViewerJob, *workersFlag*2)
 
 	for w := 1; w <= *workersFlag; w++ {
 		wg.Add(1)
-		go runBrowserWorker(ctx, w, jobChannel, &wg, *sessionFlag, *headlessFlag)
-	}
+		assignedProxy := proxyPool[(w-1)%len(proxyPool)]
+		go runBrowserWorker(ctx, w, targetStream, assignedProxy, &wg, *headlessFlag)
 
-	go func() {
-		defer close(jobChannel)
-		idx := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case jobChannel <- ViewerJob{
-				TargetURL: targetStream,
-				Proxy:     proxyPool[idx%len(proxyPool)],
-			}:
-				idx++
-				time.Sleep(1 * time.Second)
-			}
+		if w < *workersFlag {
+			time.Sleep(3 * time.Second) // Stagger window launches by 3 seconds
 		}
-	}()
+	}
 
 	select {
 	case <-sigChan:
