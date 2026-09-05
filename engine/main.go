@@ -437,26 +437,25 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 	}
 
 	if postState.FollowBtnFound && strings.EqualFold(postState.FollowBtnText, "follow") {
-		fmt.Printf("[Worker #%02d] ⚠️ Alert: Follow reverted! Anti-bot mitigation triggered. Attempting a page refresh...\n", id)
+		fmt.Printf("[Worker #%02d] ⚠️ Initial click did not flip button. Retrying native click with 2s delay...\n", id)
 
 		_ = chromedp.Run(ctx,
-			chromedp.Reload(),
-			chromedp.Sleep(6*time.Second),
-			chromedp.WaitVisible(followButtonSelector, chromedp.ByQuery),
+			chromedp.Sleep(2*time.Second),
 			chromedp.ActionFunc(func(actCtx context.Context) error {
 				return chromedp.Evaluate(fmt.Sprintf(`(() => {
 					const btn = document.querySelector('%s');
 					if (!btn) return false;
+					btn.focus();
 					btn.click();
 					return true;
 				})()`, followButtonSelector), nil).Do(actCtx)
 			}),
-			chromedp.Sleep(5*time.Second),
+			chromedp.Sleep(4*time.Second),
 		)
 
 		var recoveryUnfollow bool
 		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-			const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label="Unfollow"], button[aria-label="Following"]');
+			const unfollowBtn = document.querySelector('button[data-a-target="unfollow-button"], button[aria-label*="Unfollow"], button[aria-label*="Following"]');
 			if (unfollowBtn) return true;
 			const followBtn = document.querySelector('button[data-a-target="follow-button"]');
 			if (followBtn && (followBtn.innerText.trim().toLowerCase() === "following" || followBtn.innerText.trim().toLowerCase() === "unfollow")) return true;
@@ -464,7 +463,7 @@ func executeAndVerifyFollow(ctx context.Context, id int) error {
 		})()`, &recoveryUnfollow))
 
 		if recoveryUnfollow {
-			fmt.Printf("[Worker #%02d] 💚 Recovery Success! Follow verified and locked permanently after refresh.\n", id)
+			fmt.Printf("[Worker #%02d] 💚 Recovery Success! Follow verified and locked permanently.\n", id)
 			return nil
 		}
 
@@ -507,10 +506,11 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 		fmt.Printf("[Worker #%02d] ⚠️ Cookie injection notice: %v\n", id, err)
 	}
 
-	// 2. Navigate to the channel
+	// 2. Navigate to the channel with clean load pause (prevents ERR_EMPTY_RESPONSE)
 	fmt.Printf("[Worker #%02d] Navigating to stream channel with account session: %s\n", id, targetURL)
 	_ = chromedp.Run(ctx,
 		chromedp.Navigate(targetURL),
+		chromedp.Sleep(8*time.Second),
 	)
 
 	// Inject LocalStorage tokens so Twitch client recognizes active login state
@@ -538,12 +538,6 @@ func performAccountActions(ctx context.Context, id int, account *UserAccount, ta
 
 	if checkLogin != "" {
 		fmt.Printf("[Worker #%02d] 👤 Confirmed Authenticated Session: %s\n", id, checkLogin)
-	} else {
-		fmt.Printf("[Worker #%02d] 🔄 Syncing session: Refreshing to lock credentials into Twitch React client...\n", id)
-		_ = chromedp.Run(ctx,
-			chromedp.Reload(),
-			chromedp.Sleep(4*time.Second),
-		)
 	}
 
 	// Dismiss consent banners or mature stream dialogs if present
